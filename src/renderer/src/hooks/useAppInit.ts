@@ -254,7 +254,7 @@ tableId: "动态获取"
           prompt: promptContent,
           topics: [],
           messages: [],
-          type: 'assistant',
+          type: 'assistant' as const,
           regularPhrases: [],
           mcpServers: [
             { id: 'teable-server', name: 'teable-server' },
@@ -267,7 +267,7 @@ tableId: "动态获取"
             maxTokens: 0,
             streamOutput: true,
             topP: 0,
-            toolUseMode: 'prompt',
+            toolUseMode: 'prompt' as const,
             customParameters: []
           }
         }
