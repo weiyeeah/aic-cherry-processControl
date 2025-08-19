@@ -38,7 +38,7 @@ const MessageHeader: FC<Props> = memo(({ model, message, index, topic }) => {
 
     if (message.role === 'assistant') {
       // return getModelName(model) || getMessageModelId(message) || ''
-      return '科学计算智能体'
+      return 'NWAIC智能体'
     }
 
     return userName || t('common.you')
