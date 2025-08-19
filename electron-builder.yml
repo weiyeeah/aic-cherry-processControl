@@ -53,7 +53,7 @@ asarUnpack:
   - resources/**
   - '**/*.{metal,exp,lib}'
 win:
-  executableName: 科学计算客户端
+  executableName: NWAIC
   artifactName: ${productName}-${version}-${arch}-setup.${ext}
   target:
     - target: nsis
