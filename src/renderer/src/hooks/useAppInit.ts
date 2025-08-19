@@ -257,8 +257,22 @@ tableId: "动态获取"
           type: 'assistant' as const,
           regularPhrases: [],
           mcpServers: [
-            { id: 'teable-server', name: 'teable-server' },
-            { id: 'date-server', name: 'date-server' }
+            { 
+              id: 'teable-server', 
+              name: 'teable-server', 
+              isActive: true, 
+              type: 'streamableHttp' as const,
+              description: 'Teable多维表格服务',
+              baseUrl: 'http://127.0.0.1:6008/mcp-v3'
+            },
+            { 
+              id: 'date-server', 
+              name: 'date-server', 
+              isActive: true, 
+              type: 'streamableHttp' as const,
+              description: '日期时间服务',
+              baseUrl: 'http://127.0.0.1:6008/mcp-date'
+            }
           ],
           settings: {
             temperature: 0,
