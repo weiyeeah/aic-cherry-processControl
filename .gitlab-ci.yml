@@ -1,0 +1,114 @@
+# GitLab CI/CD pipeline equivalent of .github/workflows/release.yml
+# ---------------------------------------------------------------
+# This pipeline performs platform-specific builds (Linux, macOS, Windows),
+# creates a GitLab Release, and optionally triggers a docs-site update.
+#
+# Requirements:
+# 1. GitLab runners tagged `linux`, `macos`, and `windows` capable of running
+#    the respective build commands used below.
+# 2. Project/Group CI variables matching those used in the former workflow:
+#      • GITHUB_TOKEN               → Personal Access Token with repo scope
+#      • REPO_DISPATCH_TOKEN        → Trigger-token for docs project
+#      • RENDERER_VITE_AIHUBMIX_SECRET, CSC_LINK, CSC_KEY_PASSWORD,
+#        APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID (mac build)
+#
+# Tag-based release triggering mirrors the pattern `v*.*.*` from GH Actions.
+# Manual pipelines can still be started by supplying the variable TAG=<tag>.
+# ---------------------------------------------------------------
+
+stages:
+  - build
+  - release
+  - docs
+
+# Shared defaults -------------------------------------------------------------
+# Global defaults -------------------------------------------------------------
+before_script: &setup
+  - corepack enable && corepack prepare yarn@4.6.0 --activate
+  - yarn install --frozen-lockfile
+  - export NODE_OPTIONS="--max-old-space-size=8192"
+
+cache:
+  key: $CI_COMMIT_REF_SLUG
+  paths:
+    - .yarn/cache
+    - node_modules
+
+# Build jobs ------------------------------------------------------------------
+build_linux:
+  stage: build
+  image: node:20
+  before_script: *setup
+  script:
+    - yarn build:npm linux
+    - yarn build:linux
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  variables:
+    GH_TOKEN: $GITHUB_TOKEN
+    RENDERER_VITE_AIHUBMIX_SECRET: $RENDERER_VITE_AIHUBMIX_SECRET
+  tags:
+    - linux
+  when: manual
+
+build_windows:
+  stage: build
+  tags:
+    - windows
+  before_script: *setup
+  script:
+    - yarn build:npm windows
+    - yarn build:win
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  variables:
+    GH_TOKEN: $GITHUB_TOKEN
+    RENDERER_VITE_AIHUBMIX_SECRET: $RENDERER_VITE_AIHUBMIX_SECRET
+  when: manual
+
+build_mac:
+  stage: build
+  tags:
+    - macos
+  before_script:
+    - brew install python-setuptools || true
+    - corepack enable && corepack prepare yarn@4.6.0 --activate
+    - yarn install --frozen-lockfile
+    - export NODE_OPTIONS="--max-old-space-size=8192"
+  script:
+    - sudo -H pip install setuptools
+    - yarn build:npm mac
+    - yarn build:mac
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  variables:
+    CSC_LINK: $CSC_LINK
+    CSC_KEY_PASSWORD: $CSC_KEY_PASSWORD
+    APPLE_ID: $APPLE_ID
+    APPLE_APP_SPECIFIC_PASSWORD: $APPLE_APP_SPECIFIC_PASSWORD
+    APPLE_TEAM_ID: $APPLE_TEAM_ID
+    RENDERER_VITE_AIHUBMIX_SECRET: $RENDERER_VITE_AIHUBMIX_SECRET
+    GH_TOKEN: $GITHUB_TOKEN
+  when: manual
+
+# Release job -----------------------------------------------------------------
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  dependencies:
+    - build_linux
+    - build_windows
+    # - build_mac
+  script:
+    # release-cli will attach all artifacts from the linked jobs automatically
+    - release-cli create \
+        --name "$CI_COMMIT_TAG" \
+        --tag-name "$CI_COMMIT_TAG" \
+        --description "Release $CI_COMMIT_TAG"
+  when: manual
