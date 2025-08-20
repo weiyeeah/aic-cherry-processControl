@@ -383,7 +383,7 @@ const fetchAndProcessAssistantResponseImpl = async (
   topicId: string,
   assistant: Assistant,
   assistantMessage: Message, // Pass the prepared assistant message (new or reset)
-  _originalQuery?: string,
+  originalQuery?: string,
   currentRetryCount: number = 0
 ) => {
   const assistantMsgId = assistantMessage.id
