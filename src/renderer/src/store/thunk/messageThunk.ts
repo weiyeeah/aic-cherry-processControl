@@ -360,10 +360,6 @@ const fetchAndProcessAssistantResponseWithRetry = async (
               : `请务必调用工具获取实时数据。${originalQuery || originalContent}`
             
             // 更新消息块内容
-            const updatedBlock = {
-              ...firstBlock,
-              content: modifiedContent
-            }
             dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
           }
         }
@@ -387,7 +383,7 @@ const fetchAndProcessAssistantResponseImpl = async (
   topicId: string,
   assistant: Assistant,
   assistantMessage: Message, // Pass the prepared assistant message (new or reset)
-  originalQuery?: string,
+  _originalQuery?: string,
   currentRetryCount: number = 0
 ) => {
   const assistantMsgId = assistantMessage.id
@@ -398,8 +394,7 @@ const fetchAndProcessAssistantResponseImpl = async (
   let isOfficeAssistant = assistant.name === '智慧办公助手'
   let textLength = 0
   let forcedToolCallRequired = false
-  let retryCount = 0 // 重试次数
-  let maxRetries = 3 // 最大重试次数
+  // 使用currentRetryCount参数，无需本地变量
   let originalUserQuery = '' // 原始用户问题
   
   // 智慧办公助手强制MCP工具调用检查
@@ -580,7 +575,7 @@ const fetchAndProcessAssistantResponseImpl = async (
             }
             
             // 抛出重试错误
-            const retryError = new Error('需要调用MCP工具')
+            const retryError: any = new Error('需要调用MCP工具')
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
             throw retryError
