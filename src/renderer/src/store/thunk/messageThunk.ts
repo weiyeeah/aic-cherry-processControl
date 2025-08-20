@@ -21,6 +21,7 @@ import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@r
 import { Response } from '@renderer/types/newMessage'
 import { uuid } from '@renderer/utils'
 import { formatErrorMessage, isAbortError } from '@renderer/utils/error'
+import { abortCompletion } from '@renderer/utils/abortController'
 import {
   createAssistantMessage,
   createBaseMessageBlock,
@@ -334,6 +335,50 @@ const fetchAndProcessAssistantResponseImpl = async (
 ) => {
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
+  
+  // 智慧办公助手强制流程控制变量
+  let hasToolCall = false
+  let isOfficeAssistant = assistant.name === '智慧办公助手'
+  let textLength = 0
+  let forcedToolCallRequired = false
+  
+  // 智慧办公助手强制MCP工具调用检查
+  if (isOfficeAssistant) {
+    console.log('[强制流程控制] 检测到智慧办公助手，检查是否需要强制调用MCP工具')
+    
+    // 获取用户消息内容
+    const userMessageId = assistantMessage.askId
+    if (userMessageId) {
+      const state = getState()
+      const userMessage = state.messages.entities[userMessageId]
+      
+      if (userMessage && userMessage.blocks.length > 0) {
+        // 提取用户查询文本
+        const userQuery = userMessage.blocks
+          .map(block => block.content || '')
+          .join(' ')
+          .toLowerCase()
+        
+        // 检查是否是数据相关查询（需要调用MCP工具的关键词）
+        const dataRelatedKeywords = [
+          '查询', '查看', '工作', '任务', '日程', '进度', '状态', '数据', 
+          '表格', '记录', '情况', '完成', '安排', '计划', '时间', 
+          '周', '今天', '明天', '昨天', '月','团队', '成员', 
+          '负责', '责任', '协调', '问题','日','日程','插入', '删除', '更新'
+        ]
+        
+        const isDataQuery = dataRelatedKeywords.some(keyword => userQuery.includes(keyword))
+        
+        if (isDataQuery) {
+          forcedToolCallRequired = true
+          console.log('[强制流程控制] 检测到数据相关查询，标记为必须调用MCP工具:', userQuery.substring(0, 100))
+        } else {
+          console.log('[强制流程控制] 非数据查询，允许正常回答:', userQuery.substring(0, 100))
+        }
+      }
+    }
+  }
+  
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
@@ -417,6 +462,68 @@ const fetchAndProcessAssistantResponseImpl = async (
         await handleBlockTransition(baseBlock as PlaceholderMessageBlock, MessageBlockType.UNKNOWN)
       },
       onTextChunk: async (text) => {
+        textLength += text.length
+        
+        // 智慧办公助手强制流程控制：检测未调用工具的文本生成
+        // 对于强制要求调用工具的查询，阈值降低到50字符；普通查询保持80字符
+        const textThreshold = forcedToolCallRequired ? 50 : 80
+        if (isOfficeAssistant && !hasToolCall && textLength > textThreshold) {
+          const warningType = forcedToolCallRequired ? '数据相关查询' : '检测到的查询'
+          console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，强制中断响应`)
+          
+          // 创建错误提示消息
+          const errorText = forcedToolCallRequired 
+            ? '⚠️ **强制MCP工具调用**\n\n您的查询涉及实时数据（工作、任务、日程等），根据系统强制要求，必须调用MCP工具获取最新信息。\n\n请重新提问，我将立即调用相关工具为您查询。'
+            : '⚠️ **强制流程控制触发**\n\n检测到您尝试基于记忆回答问题。根据系统设置，智慧办公助手必须调用MCP工具获取实时数据。\n\n请重新提问，我将调用相关工具为您获取最新信息。'
+          
+          // 强制完成当前消息并显示错误
+          if (mainTextBlockId) {
+            const changes = {
+              content: errorText,
+              status: MessageBlockStatus.SUCCESS
+            }
+            dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+            saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+          } else if (initialPlaceholderBlockId) {
+            const changes = {
+              type: MessageBlockType.MAIN_TEXT,
+              content: errorText,
+              status: MessageBlockStatus.SUCCESS
+            }
+            dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
+            saveUpdatedBlockToDB(initialPlaceholderBlockId, assistantMsgId, topicId, getState)
+          } else {
+            // 创建新的错误块
+            const errorBlock = createMainTextBlock(assistantMsgId, errorText, {
+              status: MessageBlockStatus.SUCCESS
+            })
+            await handleBlockTransition(errorBlock, MessageBlockType.MAIN_TEXT)
+          }
+          
+          // 标记消息完成
+          dispatch(
+            newMessagesActions.updateMessage({
+              topicId,
+              messageId: assistantMsgId,
+              updates: { status: AssistantMessageStatus.SUCCESS }
+            })
+          )
+          
+          // 强制中断流处理 - 使用AbortController机制
+          try {
+            abortCompletion(assistantMsgId)
+            console.log('[强制流程控制] 已通过AbortController强制中断流处理')
+          } catch (error) {
+            console.warn('[强制流程控制] AbortController中断失败:', error)
+          }
+          
+          // 设置加载状态为false
+          dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+          
+          // 提前终止流处理
+          return
+        }
+        
         accumulatedContent += text
         if (mainTextBlockId) {
           const blockChanges: Partial<MessageBlock> = {
@@ -448,6 +555,17 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onTextComplete: async (finalText) => {
+        // 智慧办公助手最终检查：如果完成时仍未调用工具，添加警告
+        if (isOfficeAssistant && !hasToolCall && finalText.length > 0) {
+          if (forcedToolCallRequired) {
+            console.warn('[强制流程控制] 智慧办公助手完成数据相关查询但未调用MCP工具，添加强制警告')
+            finalText += '\n\n🚨 **严重警告**：此查询涉及实时数据但未调用MCP工具！回答可能不准确。强烈建议重新提问以获取最新数据。'
+          } else {
+            console.warn('[强制流程控制] 智慧办公助手完成响应但未调用MCP工具，添加警告提示')
+            finalText += '\n\n⚠️ **系统警告**：此回答可能基于历史记忆生成，建议重新提问以获取实时数据。'
+          }
+        }
+        
         if (mainTextBlockId) {
           const changes = {
             content: finalText,
@@ -520,6 +638,12 @@ const fetchAndProcessAssistantResponseImpl = async (
         thinkingBlockId = null
       },
       onToolCallInProgress: (toolResponse: MCPToolResponse) => {
+        // 标记已调用工具，解除强制流程控制
+        hasToolCall = true
+        if (isOfficeAssistant) {
+          console.log('[强制流程控制] 智慧办公助手正在调用MCP工具:', toolResponse.tool.name)
+        }
+        
         if (initialPlaceholderBlockId) {
           lastBlockType = MessageBlockType.TOOL
           const changes = {
@@ -547,6 +671,12 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onToolCallComplete: (toolResponse: MCPToolResponse) => {
+        // 确保已调用工具的标记
+        hasToolCall = true
+        if (isOfficeAssistant) {
+          console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status)
+        }
+        
         const existingBlockId = toolCallIdToBlockIdMap.get(toolResponse.id)
         toolCallIdToBlockIdMap.delete(toolResponse.id)
         if (toolResponse.status === 'done' || toolResponse.status === 'error') {
