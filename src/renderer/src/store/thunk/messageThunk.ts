@@ -341,6 +341,8 @@ const fetchAndProcessAssistantResponseImpl = async (
   let isOfficeAssistant = assistant.name === '智慧办公助手'
   let textLength = 0
   let forcedToolCallRequired = false
+  let warningShown = false // 标记警告是否已显示
+  let originalFinalText = '' // 保存原始文本（不含警告）
   
   // 智慧办公助手强制MCP工具调用检查
   if (isOfficeAssistant) {
@@ -399,9 +401,9 @@ const fetchAndProcessAssistantResponseImpl = async (
     if (forcedToolCallRequired) {
       setTimeout(() => {
         if (!hasToolCall) {
-          console.warn('[强制流程控制] 3秒内未检测到MCP工具调用，可能需要强制中断')
+          console.warn('[强制流程控制] 8秒内未检测到MCP工具调用，可能需要强制中断')
         }
-      }, 3000)
+      }, 8000)
     }
 
     let accumulatedContent = ''
@@ -487,8 +489,8 @@ const fetchAndProcessAssistantResponseImpl = async (
         textLength += text.length
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
-        // 对于强制要求调用工具的查询，设置极低阈值(10字符)几乎立即中断；普通查询保持80字符
-        const textThreshold = forcedToolCallRequired ? 10 : 80
+        // 对于强制要求调用工具的查询，设置极低阈值(25字符)几乎立即中断；普通查询保持80字符
+        const textThreshold = forcedToolCallRequired ? 25 : 80
         if (isOfficeAssistant && !hasToolCall && textLength > textThreshold) {
           const warningType = forcedToolCallRequired ? '数据相关查询' : '检测到的查询'
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，强制中断响应`)
@@ -577,14 +579,19 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onTextComplete: async (finalText) => {
-        // 智慧办公助手最终检查：如果完成时仍未调用工具，添加警告
-        if (isOfficeAssistant && !hasToolCall && finalText.length > 0) {
+        // 保存原始文本（不含警告）
+        originalFinalText = finalText
+        
+        // 智慧办公助手最终检查：如果完成时仍未调用工具，添加警告（只添加一次）
+        if (isOfficeAssistant && !hasToolCall && finalText.length > 0 && !warningShown) {
           if (forcedToolCallRequired) {
             console.warn('[强制流程控制] 智慧办公助手完成数据相关查询但未调用MCP工具，添加强制警告')
             finalText += '\n\n🚨 **严重警告**：此查询涉及实时数据但未调用MCP工具！回答可能不准确。强烈建议重新提问以获取最新数据。'
+            warningShown = true
           } else {
             console.warn('[强制流程控制] 智慧办公助手完成响应但未调用MCP工具，添加警告提示')
             finalText += '\n\n⚠️ **系统警告**：此回答可能基于历史记忆生成，建议重新提问以获取实时数据。'
+            warningShown = true
           }
         }
         
@@ -662,8 +669,22 @@ const fetchAndProcessAssistantResponseImpl = async (
       onToolCallInProgress: (toolResponse: MCPToolResponse) => {
         // 标记已调用工具，解除强制流程控制
         hasToolCall = true
+        
+        // 如果是智慧办公助手且之前显示了警告，则删除警告
         if (isOfficeAssistant) {
           console.log('[强制流程控制] 智慧办公助手正在调用MCP工具:', toolResponse.tool.name)
+          
+          // 如果之前显示了警告，现在删除它并恢复原始文本
+          if (warningShown && mainTextBlockId && originalFinalText) {
+            console.log('[强制流程控制] 检测到MCP工具调用，删除之前的警告')
+            const changes = {
+              content: originalFinalText,
+              status: MessageBlockStatus.SUCCESS
+            }
+            dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+            saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+            warningShown = false // 重置警告状态
+          }
         }
         
         if (initialPlaceholderBlockId) {
@@ -695,8 +716,21 @@ const fetchAndProcessAssistantResponseImpl = async (
       onToolCallComplete: (toolResponse: MCPToolResponse) => {
         // 确保已调用工具的标记
         hasToolCall = true
+        
         if (isOfficeAssistant) {
           console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status)
+          
+          // 如果之前显示了警告且工具调用成功，现在删除它并恢复原始文本
+          if (warningShown && mainTextBlockId && originalFinalText && toolResponse.status === 'done') {
+            console.log('[强制流程控制] MCP工具调用成功，删除之前的警告')
+            const changes = {
+              content: originalFinalText,
+              status: MessageBlockStatus.SUCCESS
+            }
+            dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+            saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+            warningShown = false // 重置警告状态
+          }
         }
         
         const existingBlockId = toolCallIdToBlockIdMap.get(toolResponse.id)
