@@ -354,8 +354,16 @@ const fetchAndProcessAssistantResponseWithRetry = async (
           const firstBlock = messageBlocks[firstBlockId]
           
           if (firstBlock && 'content' in firstBlock) {
+            // 确保内容是字符串类型
+            const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+            
             // 使用originalQuery作为基础内容，如果没有则使用当前内容
-            let baseContent = originalQuery || firstBlock.content || ''
+            let baseContent = originalQuery || currentContent || ''
+            
+            // 确保baseContent是字符串
+            if (typeof baseContent !== 'string') {
+              baseContent = ''
+            }
             
             // 清理已有的工具指令前缀，避免重复添加
             baseContent = baseContent
@@ -1111,7 +1119,9 @@ export const sendMessage =
                 const firstBlock = messageBlocks[firstBlockId]
                 
                 if (firstBlock && 'content' in firstBlock) {
-                  const originalContent = firstBlock.content || ''
+                  // 确保内容是字符串类型
+                  const originalContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+                  
                   // 检查是否已经包含工具调用指令，避免重复添加
                   if (!originalContent.startsWith('请调用工具')) {
                     const modifiedContent = `请调用工具。${originalContent}`
