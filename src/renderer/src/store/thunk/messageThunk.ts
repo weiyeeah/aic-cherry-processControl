@@ -353,9 +353,15 @@ const fetchAndProcessAssistantResponseImpl = async (
       const userMessage = state.messages.entities[userMessageId]
       
       if (userMessage && userMessage.blocks.length > 0) {
+        // 获取消息块实体
+        const messageBlocks = state.messageBlocks.entities
+        
         // 提取用户查询文本
         const userQuery = userMessage.blocks
-          .map(block => block.content || '')
+          .map(blockId => {
+            const block = messageBlocks[blockId]
+            return block?.content || ''
+          })
           .join(' ')
           .toLowerCase()
         
