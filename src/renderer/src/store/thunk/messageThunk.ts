@@ -360,7 +360,11 @@ const fetchAndProcessAssistantResponseImpl = async (
         const userQuery = userMessage.blocks
           .map(blockId => {
             const block = messageBlocks[blockId]
-            return block?.content || ''
+            // 只从有内容的块类型中提取文本
+            if (block && 'content' in block) {
+              return block.content || ''
+            }
+            return ''
           })
           .join(' ')
           .toLowerCase()
@@ -370,7 +374,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           '查询', '查看', '工作', '任务', '日程', '进度', '状态', '数据', 
           '表格', '记录', '情况', '完成', '安排', '计划', '时间', 
           '周', '今天', '明天', '昨天', '月','团队', '成员', 
-          '负责', '责任', '协调', '问题','日','日程','插入', '删除', '更新'
+          '负责', '责任', '协调', '问题','日','插入', '删除', '更新'
         ]
         
         const isDataQuery = dataRelatedKeywords.some(keyword => userQuery.includes(keyword))
