@@ -332,59 +332,94 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   topicId: string,
   assistant: Assistant,
   assistantMessage: Message,
-  originalQuery?: string,
+  originalUserContent?: string,
   retryCount: number = 0
 ): Promise<void> => {
   try {
-    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalQuery, retryCount)
+    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount)
   } catch (error: any) {
     // 如果是需要重试的错误，进行重试
     if (error.shouldRetry && retryCount < 10) {
       console.log(`[强制流程控制] 准备重试，当前重试次数: ${retryCount + 1}/10`)
       
-      // 修改assistant message的prompt，添加强制调用工具的指令
+      // 1. 清理assistant消息的内容，准备重新生成
       const state = getState()
+      const assistantMessageBlocks = assistantMessage.blocks
+      
+      // 清理assistant消息的所有blocks
+      if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
+        for (const blockId of assistantMessageBlocks) {
+          const block = state.messageBlocks.entities[blockId]
+          if (block) {
+            // 清空block内容但保留结构
+            if ('content' in block) {
+              dispatch(updateOneBlock({ 
+                id: blockId, 
+                changes: { 
+                  content: '',
+                  status: MessageBlockStatus.PROCESSING 
+                } 
+              }))
+            }
+          }
+        }
+      }
+      
+      // 2. 修改用户消息，添加更强的工具调用指令
       const userMessageId = assistantMessage.askId
       if (userMessageId) {
         const userMessage = state.messages.entities[userMessageId]
         if (userMessage && userMessage.blocks.length > 0) {
-          // 获取用户消息的第一个文本块并修改内容
           const messageBlocks = state.messageBlocks.entities
           const firstBlockId = userMessage.blocks[0]
           const firstBlock = messageBlocks[firstBlockId]
           
           if (firstBlock && 'content' in firstBlock) {
-            // 确保内容是字符串类型
-            const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
-            
-            // 使用originalQuery作为基础内容，如果没有则使用当前内容
-            let baseContent = originalQuery || currentContent || ''
-            
-            // 确保baseContent是字符串
-            if (typeof baseContent !== 'string') {
-              baseContent = ''
+            // 使用原始内容作为基础（如果有的话）
+            let baseContent = originalUserContent
+            if (!baseContent) {
+              const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+              // 清理已有的工具指令前缀，获取原始内容
+              baseContent = currentContent
+                .replace(/^请调用工具。/, '')
+                .replace(/^请务必调用工具获取实时数据。/, '')
+                .replace(/^重要：必须调用MCP工具！/, '')
+                .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
+                .replace(/^强制要求：立即调用工具获取数据！/, '')
+                .trim()
             }
             
-            // 清理已有的工具指令前缀，避免重复添加
-            baseContent = baseContent
-              .replace(/^请调用工具。/, '')
-              .replace(/^请务必调用工具获取实时数据。/, '')
-              .trim()
+            // 根据重试次数使用更强的指令
+            const toolInstructions = [
+              '请调用工具。',
+              '请务必调用工具获取实时数据。',
+              '重要：必须调用MCP工具！',
+              '警告：禁止使用记忆，必须调用工具！',
+              '强制要求：立即调用工具获取数据！'
+            ]
             
-            const modifiedContent = `请务必调用工具获取实时数据。${baseContent}`
+            const instructionIndex = Math.min(retryCount, toolInstructions.length - 1)
+            const modifiedContent = `${toolInstructions[instructionIndex]}${baseContent}`
             
-            console.log(`[强制流程控制] 重试第${retryCount + 1}次，修改用户查询为: "${modifiedContent.substring(0, 100)}..."`)
+            console.log(`[强制流程控制] 重试第${retryCount + 1}次，使用指令: "${toolInstructions[instructionIndex]}"`)
+            console.log(`[强制流程控制] 完整内容: "${modifiedContent.substring(0, 100)}..."`)
             
-            // 更新消息块内容
+            // 更新用户消息内容
             dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
+            
+            // 保存原始内容供后续重试使用
+            if (!originalUserContent) {
+              originalUserContent = baseContent
+            }
           }
         }
       }
       
-      // 延迟后重试
+      // 3. 延迟后重新开始完整的API调用流程
       setTimeout(() => {
-        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalQuery, retryCount + 1)
-      }, 1500) // 增加延迟时间
+        console.log(`[强制流程控制] 开始第${retryCount + 1}次重试，重新调用API`)
+        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount + 1)
+      }, 1500)
     } else {
       // 超过最大重试次数或其他错误，抛出
       throw error
@@ -399,7 +434,7 @@ const fetchAndProcessAssistantResponseImpl = async (
   topicId: string,
   assistant: Assistant,
   assistantMessage: Message, // Pass the prepared assistant message (new or reset)
-  _originalQuery?: string,
+  _originalUserContent?: string,
   currentRetryCount: number = 0
 ) => {
   const assistantMsgId = assistantMessage.id
@@ -1108,9 +1143,11 @@ export const sendMessage =
         queue.add(async () => {
           // 对智慧办公助手使用重试包装器
           if (assistant.name === '智慧办公助手') {
-            // 智慧办公助手：在第一次请求就加上调用工具指令
+            // 智慧办公助手：保存原始用户内容，并在第一次请求就加上调用工具指令
             const state = getState()
             const userMessageId = assistantMessage.askId
+            let originalUserContent: string | undefined = undefined
+            
             if (userMessageId) {
               const userMessage = state.messages.entities[userMessageId]
               if (userMessage && userMessage.blocks.length > 0) {
@@ -1120,11 +1157,20 @@ export const sendMessage =
                 
                 if (firstBlock && 'content' in firstBlock) {
                   // 确保内容是字符串类型
-                  const originalContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+                  const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+                  
+                  // 保存原始用户内容（清理工具指令）
+                  originalUserContent = currentContent
+                    .replace(/^请调用工具。/, '')
+                    .replace(/^请务必调用工具获取实时数据。/, '')
+                    .replace(/^重要：必须调用MCP工具！/, '')
+                    .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
+                    .replace(/^强制要求：立即调用工具获取数据！/, '')
+                    .trim()
                   
                   // 检查是否已经包含工具调用指令，避免重复添加
-                  if (!originalContent.startsWith('请调用工具')) {
-                    const modifiedContent = `请调用工具。${originalContent}`
+                  if (!currentContent.startsWith('请调用工具')) {
+                    const modifiedContent = `请调用工具。${originalUserContent}`
                     dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
                     console.log('[强制流程控制] 已在用户查询前添加工具调用指令')
                   }
@@ -1132,7 +1178,7 @@ export const sendMessage =
               }
             }
             
-            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, undefined, 0)
+            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
           } else {
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
           }
