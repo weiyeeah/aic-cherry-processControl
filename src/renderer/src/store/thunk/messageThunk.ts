@@ -589,7 +589,16 @@ const fetchAndProcessAssistantResponseImpl = async (
         const textThreshold = 15
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
-          console.log(`[强制流程控制] 检测状态: hasToolCall=${hasToolCall}, hasMCPToolCall=${hasMCPToolCall}, forcedToolCallRequired=${forcedToolCallRequired}`)
+          console.log(`[强制流程控制] 检测状态详情:`, {
+            hasToolCall,
+            hasMCPToolCall,
+            forcedToolCallRequired,
+            textLength,
+            textThreshold,
+            currentRetryCount,
+            assistantName: assistant.name,
+            text: text.substring(0, 50) + '...'
+          })
           
           // 智慧办公助手所有查询都强制调用工具，未达到最大重试次数时抛出重试错误
           if (currentRetryCount < 10) {
@@ -760,14 +769,19 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 标记已调用工具，解除强制流程控制
         hasToolCall = true
         
-        // 检测是否是真正的MCP工具调用（而不是其他类型的工具）
-        if (toolResponse.tool && toolResponse.tool.name && toolResponse.status === 'invoking') {
+        // 检测是否是真正的MCP工具调用（更宽松的检测条件）
+        if (toolResponse.tool && toolResponse.tool.name) {
           hasMCPToolCall = true
           if (isOfficeAssistant) {
-            console.log('[强制流程控制] 智慧办公助手正在调用MCP工具:', toolResponse.tool.name, '状态:', toolResponse.status)
+            console.log('[强制流程控制] 智慧办公助手检测到MCP工具调用:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
           }
-        } else if (isOfficeAssistant && toolResponse.tool) {
-          console.log('[强制流程控制] 检测到工具调用但状态不是invoking:', toolResponse.tool.name, '状态:', toolResponse.status)
+        } else if (isOfficeAssistant) {
+          console.log('[强制流程控制] 检测到工具调用但缺少工具信息:', {
+            hasTool: !!toolResponse.tool,
+            toolName: toolResponse.tool?.name,
+            status: toolResponse.status,
+            id: toolResponse.id
+          })
         }
         
         if (initialPlaceholderBlockId) {
@@ -800,14 +814,24 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 确保已调用工具的标记
         hasToolCall = true
         
-        // MCP工具调用完成检测（无论成功还是错误，都认为已经调用了工具）
-        if (toolResponse.tool && toolResponse.tool.name && (toolResponse.status === 'done' || toolResponse.status === 'error')) {
+        // MCP工具调用完成检测（检测任何有工具信息的调用）
+        if (toolResponse.tool && toolResponse.tool.name) {
           hasMCPToolCall = true
           if (isOfficeAssistant) {
-            console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status)
+            console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
+            // 如果有响应内容，也记录一下
+            if (toolResponse.response) {
+              console.log('[强制流程控制] MCP工具响应内容长度:', typeof toolResponse.response === 'string' ? toolResponse.response.length : 'non-string')
+            }
           }
         } else if (isOfficeAssistant) {
-          console.log('[强制流程控制] 智慧办公助手工具调用状态:', toolResponse.status, '工具:', toolResponse.tool?.name)
+          console.log('[强制流程控制] 工具调用完成但缺少工具信息:', {
+            hasTool: !!toolResponse.tool,
+            toolName: toolResponse.tool?.name,
+            status: toolResponse.status,
+            id: toolResponse.id,
+            hasResponse: !!toolResponse.response
+          })
         }
         
         const existingBlockId = toolCallIdToBlockIdMap.get(toolResponse.id)
