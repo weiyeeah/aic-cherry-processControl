@@ -339,8 +339,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
     await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalQuery, retryCount)
   } catch (error: any) {
     // 如果是需要重试的错误，进行重试
-    if (error.shouldRetry && retryCount < 3) {
-      console.log(`[强制流程控制] 准备重试，当前重试次数: ${retryCount + 1}`)
+    if (error.shouldRetry && retryCount < 10) {
+      console.log(`[强制流程控制] 准备重试，当前重试次数: ${retryCount + 1}/10`)
       
       // 修改assistant message的prompt，添加强制调用工具的指令
       const state = getState()
@@ -548,7 +548,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，准备自动重试`)
           
           // 如果是需要强制调用工具的查询且未达到最大重试次数，抛出重试错误
-          if (forcedToolCallRequired && currentRetryCount < 3) {
+          if (forcedToolCallRequired && currentRetryCount < 10) {
             // 显示"请稍等"提示
             const waitingText = '⏳ **请稍等**\n\n正在自动重新尝试调用工具获取实时数据...'
             
@@ -579,8 +579,8 @@ const fetchAndProcessAssistantResponseImpl = async (
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
             throw retryError
-          } else {
-            // 达到最大重试次数或普通查询，显示最终错误
+          } else if (forcedToolCallRequired && currentRetryCount >= 10) {
+            // 达到最大重试次数，显示最终错误
             const errorText = '❌ **无法获取实时数据**\n\n经过多次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
             
             if (mainTextBlockId) {
@@ -602,6 +602,9 @@ const fetchAndProcessAssistantResponseImpl = async (
             
             dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
             return
+          } else {
+            // 非强制工具调用的普通查询，显示警告但继续处理
+            console.warn('[强制流程控制] 智慧办公助手未调用工具，但这是普通查询，继续处理')
           }
         }
         
@@ -1084,7 +1087,7 @@ export const sendMessage =
         queue.add(async () => {
           // 对智慧办公助手使用重试包装器
           if (assistant.name === '智慧办公助手') {
-            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage)
+            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, undefined, 0)
           } else {
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
           }
