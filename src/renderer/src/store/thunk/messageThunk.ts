@@ -325,13 +325,70 @@ const dispatchMultiModelResponses = async (
 
 // --- End Helper Function ---
 
+// 自动重试包装器 - 当智慧办公助手需要强制调用工具但未调用时自动重试
+const fetchAndProcessAssistantResponseWithRetry = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  assistant: Assistant,
+  assistantMessage: Message,
+  originalQuery?: string,
+  retryCount: number = 0
+): Promise<void> => {
+  try {
+    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalQuery, retryCount)
+  } catch (error: any) {
+    // 如果是需要重试的错误，进行重试
+    if (error.shouldRetry && retryCount < 3) {
+      console.log(`[强制流程控制] 准备重试，当前重试次数: ${retryCount + 1}`)
+      
+      // 修改assistant message的prompt，添加强制调用工具的指令
+      const state = getState()
+      const userMessageId = assistantMessage.askId
+      if (userMessageId) {
+        const userMessage = state.messages.entities[userMessageId]
+        if (userMessage && userMessage.blocks.length > 0) {
+          // 获取用户消息的第一个文本块并修改内容
+          const messageBlocks = state.messageBlocks.entities
+          const firstBlockId = userMessage.blocks[0]
+          const firstBlock = messageBlocks[firstBlockId]
+          
+          if (firstBlock && 'content' in firstBlock) {
+            const originalContent = firstBlock.content || ''
+            const modifiedContent = retryCount === 0 
+              ? `请调用工具。${originalContent}`
+              : `请务必调用工具获取实时数据。${originalQuery || originalContent}`
+            
+            // 更新消息块内容
+            const updatedBlock = {
+              ...firstBlock,
+              content: modifiedContent
+            }
+            dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
+          }
+        }
+      }
+      
+      // 延迟后重试
+      setTimeout(() => {
+        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalQuery, retryCount + 1)
+      }, 1500) // 增加延迟时间
+    } else {
+      // 超过最大重试次数或其他错误，抛出
+      throw error
+    }
+  }
+}
+
 // Internal function extracted from sendMessage to handle fetching and processing assistant response
 const fetchAndProcessAssistantResponseImpl = async (
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
   assistant: Assistant,
-  assistantMessage: Message // Pass the prepared assistant message (new or reset)
+  assistantMessage: Message, // Pass the prepared assistant message (new or reset)
+  originalQuery?: string,
+  currentRetryCount: number = 0
 ) => {
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
@@ -341,8 +398,9 @@ const fetchAndProcessAssistantResponseImpl = async (
   let isOfficeAssistant = assistant.name === '智慧办公助手'
   let textLength = 0
   let forcedToolCallRequired = false
-  let warningShown = false // 标记警告是否已显示
-  let originalFinalText = '' // 保存原始文本（不含警告）
+  let retryCount = 0 // 重试次数
+  let maxRetries = 3 // 最大重试次数
+  let originalUserQuery = '' // 原始用户问题
   
   // 智慧办公助手强制MCP工具调用检查
   if (isOfficeAssistant) {
@@ -369,7 +427,9 @@ const fetchAndProcessAssistantResponseImpl = async (
             return ''
           })
           .join(' ')
-          .toLowerCase()
+        
+        // 保存原始用户查询（用于重试）
+        originalUserQuery = userQuery
         
         // 检查是否是数据相关查询（需要调用MCP工具的关键词）
         const dataRelatedKeywords = [
@@ -379,14 +439,11 @@ const fetchAndProcessAssistantResponseImpl = async (
           '负责', '责任', '协调', '问题','日','插入', '删除', '更新'
         ]
         
-        const isDataQuery = dataRelatedKeywords.some(keyword => userQuery.includes(keyword))
+        const isDataQuery = dataRelatedKeywords.some(keyword => userQuery.toLowerCase().includes(keyword))
         
         if (isDataQuery) {
           forcedToolCallRequired = true
           console.log('[强制流程控制] 检测到数据相关查询，将强制要求调用MCP工具:', userQuery.substring(0, 100))
-          
-          // 在这里我们可以考虑修改prompt或者在响应开始前注入强制指令
-          // 但目前先通过更严格的监控来实现强制效果
         } else {
           console.log('[强制流程控制] 非数据查询，允许正常回答:', userQuery.substring(0, 100))
         }
@@ -489,63 +546,68 @@ const fetchAndProcessAssistantResponseImpl = async (
         textLength += text.length
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
-        // 对于强制要求调用工具的查询，设置极低阈值(25字符)几乎立即中断；普通查询保持80字符
-        const textThreshold = forcedToolCallRequired ? 25 : 80
+        // 对于强制要求调用工具的查询，设置极低阈值(15字符)几乎立即中断并重试
+        const textThreshold = forcedToolCallRequired ? 15 : 80
         if (isOfficeAssistant && !hasToolCall && textLength > textThreshold) {
           const warningType = forcedToolCallRequired ? '数据相关查询' : '检测到的查询'
-          console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，强制中断响应`)
+          console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，准备自动重试`)
           
-          // 创建错误提示消息
-          const errorText = forcedToolCallRequired 
-            ? '🚫 **强制MCP工具调用**\n\n系统检测到您的查询涉及实时数据（工作、任务、日程等）。根据强制要求，我必须调用MCP工具获取最新信息，而不能基于记忆回答。\n\n🔄 **请重新提问**，我将立即调用相关工具为您查询最新数据。\n\n💡 **提示**：系统会自动识别数据相关查询并强制调用工具，确保信息准确性。'
-            : '⚠️ **强制流程控制触发**\n\n检测到您尝试基于记忆回答问题。根据系统设置，智慧办公助手必须调用MCP工具获取实时数据。\n\n请重新提问，我将调用相关工具为您获取最新信息。'
-          
-          // 强制完成当前消息并显示错误
-          if (mainTextBlockId) {
-            const changes = {
-              content: errorText,
-              status: MessageBlockStatus.SUCCESS
+          // 如果是需要强制调用工具的查询且未达到最大重试次数，抛出重试错误
+          if (forcedToolCallRequired && currentRetryCount < 3) {
+            // 显示"请稍等"提示
+            const waitingText = '⏳ **请稍等**\n\n正在自动重新尝试调用工具获取实时数据...'
+            
+            if (mainTextBlockId) {
+              const changes = {
+                content: waitingText,
+                status: MessageBlockStatus.PROCESSING
+              }
+              dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+            } else if (initialPlaceholderBlockId) {
+              const changes = {
+                type: MessageBlockType.MAIN_TEXT,
+                content: waitingText,
+                status: MessageBlockStatus.PROCESSING
+              }
+              dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
             }
-            dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
-            saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
-          } else if (initialPlaceholderBlockId) {
-            const changes = {
-              type: MessageBlockType.MAIN_TEXT,
-              content: errorText,
-              status: MessageBlockStatus.SUCCESS
+            
+            // 中断当前流处理
+            try {
+              abortCompletion(assistantMsgId)
+            } catch (error) {
+              console.warn('[强制流程控制] AbortController中断失败:', error)
             }
-            dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
-            saveUpdatedBlockToDB(initialPlaceholderBlockId, assistantMsgId, topicId, getState)
+            
+            // 抛出重试错误
+            const retryError = new Error('需要调用MCP工具')
+            retryError.shouldRetry = true
+            retryError.originalQuery = originalUserQuery
+            throw retryError
           } else {
-            // 创建新的错误块
-            const errorBlock = createMainTextBlock(assistantMsgId, errorText, {
-              status: MessageBlockStatus.SUCCESS
-            })
-            await handleBlockTransition(errorBlock, MessageBlockType.MAIN_TEXT)
+            // 达到最大重试次数或普通查询，显示最终错误
+            const errorText = '❌ **无法获取实时数据**\n\n经过多次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
+            
+            if (mainTextBlockId) {
+              const changes = {
+                content: errorText,
+                status: MessageBlockStatus.ERROR
+              }
+              dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+              saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+            }
+            
+            dispatch(
+              newMessagesActions.updateMessage({
+                topicId,
+                messageId: assistantMsgId,
+                updates: { status: AssistantMessageStatus.SUCCESS }
+              })
+            )
+            
+            dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+            return
           }
-          
-          // 标记消息完成
-          dispatch(
-            newMessagesActions.updateMessage({
-              topicId,
-              messageId: assistantMsgId,
-              updates: { status: AssistantMessageStatus.SUCCESS }
-            })
-          )
-          
-          // 强制中断流处理 - 使用AbortController机制
-          try {
-            abortCompletion(assistantMsgId)
-            console.log('[强制流程控制] 已通过AbortController强制中断流处理')
-          } catch (error) {
-            console.warn('[强制流程控制] AbortController中断失败:', error)
-          }
-          
-          // 设置加载状态为false
-          dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
-          
-          // 提前终止流处理
-          return
         }
         
         accumulatedContent += text
@@ -579,21 +641,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onTextComplete: async (finalText) => {
-        // 保存原始文本（不含警告）
-        originalFinalText = finalText
-        
-        // 智慧办公助手最终检查：如果完成时仍未调用工具，添加警告（只添加一次）
-        if (isOfficeAssistant && !hasToolCall && finalText.length > 0 && !warningShown) {
-          if (forcedToolCallRequired) {
-            console.warn('[强制流程控制] 智慧办公助手完成数据相关查询但未调用MCP工具，添加强制警告')
-            finalText += '\n\n🚨 **严重警告**：此查询涉及实时数据但未调用MCP工具！回答可能不准确。强烈建议重新提问以获取最新数据。'
-            warningShown = true
-          } else {
-            console.warn('[强制流程控制] 智慧办公助手完成响应但未调用MCP工具，添加警告提示')
-            finalText += '\n\n⚠️ **系统警告**：此回答可能基于历史记忆生成，建议重新提问以获取实时数据。'
-            warningShown = true
-          }
-        }
+        // 使用自动重试机制，无需在这里添加警告
         
         if (mainTextBlockId) {
           const changes = {
@@ -670,21 +718,8 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 标记已调用工具，解除强制流程控制
         hasToolCall = true
         
-        // 如果是智慧办公助手且之前显示了警告，则删除警告
         if (isOfficeAssistant) {
           console.log('[强制流程控制] 智慧办公助手正在调用MCP工具:', toolResponse.tool.name)
-          
-          // 如果之前显示了警告，现在删除它并恢复原始文本
-          if (warningShown && mainTextBlockId && originalFinalText) {
-            console.log('[强制流程控制] 检测到MCP工具调用，删除之前的警告')
-            const changes = {
-              content: originalFinalText,
-              status: MessageBlockStatus.SUCCESS
-            }
-            dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
-            saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
-            warningShown = false // 重置警告状态
-          }
         }
         
         if (initialPlaceholderBlockId) {
@@ -719,18 +754,6 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         if (isOfficeAssistant) {
           console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status)
-          
-          // 如果之前显示了警告且工具调用成功，现在删除它并恢复原始文本
-          if (warningShown && mainTextBlockId && originalFinalText && toolResponse.status === 'done') {
-            console.log('[强制流程控制] MCP工具调用成功，删除之前的警告')
-            const changes = {
-              content: originalFinalText,
-              status: MessageBlockStatus.SUCCESS
-            }
-            dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
-            saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
-            warningShown = false // 重置警告状态
-          }
         }
         
         const existingBlockId = toolCallIdToBlockIdMap.get(toolResponse.id)
@@ -1064,7 +1087,12 @@ export const sendMessage =
         dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
 
         queue.add(async () => {
-          await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
+          // 对智慧办公助手使用重试包装器
+          if (assistant.name === '智慧办公助手') {
+            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage)
+          } else {
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
+          }
         })
       }
     } catch (error) {
