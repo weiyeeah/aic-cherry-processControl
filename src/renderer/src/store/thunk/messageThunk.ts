@@ -381,7 +381,10 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         if (isDataQuery) {
           forcedToolCallRequired = true
-          console.log('[强制流程控制] 检测到数据相关查询，标记为必须调用MCP工具:', userQuery.substring(0, 100))
+          console.log('[强制流程控制] 检测到数据相关查询，将强制要求调用MCP工具:', userQuery.substring(0, 100))
+          
+          // 在这里我们可以考虑修改prompt或者在响应开始前注入强制指令
+          // 但目前先通过更严格的监控来实现强制效果
         } else {
           console.log('[强制流程控制] 非数据查询，允许正常回答:', userQuery.substring(0, 100))
         }
@@ -391,6 +394,15 @@ const fetchAndProcessAssistantResponseImpl = async (
   
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
+
+    // 如果是强制要求调用工具的查询，设置一个延时检查
+    if (forcedToolCallRequired) {
+      setTimeout(() => {
+        if (!hasToolCall) {
+          console.warn('[强制流程控制] 3秒内未检测到MCP工具调用，可能需要强制中断')
+        }
+      }, 3000)
+    }
 
     let accumulatedContent = ''
     let accumulatedThinking = ''
@@ -475,15 +487,15 @@ const fetchAndProcessAssistantResponseImpl = async (
         textLength += text.length
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
-        // 对于强制要求调用工具的查询，阈值降低到50字符；普通查询保持80字符
-        const textThreshold = forcedToolCallRequired ? 50 : 80
+        // 对于强制要求调用工具的查询，设置极低阈值(10字符)几乎立即中断；普通查询保持80字符
+        const textThreshold = forcedToolCallRequired ? 10 : 80
         if (isOfficeAssistant && !hasToolCall && textLength > textThreshold) {
           const warningType = forcedToolCallRequired ? '数据相关查询' : '检测到的查询'
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，强制中断响应`)
           
           // 创建错误提示消息
           const errorText = forcedToolCallRequired 
-            ? '⚠️ **强制MCP工具调用**\n\n您的查询涉及实时数据（工作、任务、日程等），根据系统强制要求，必须调用MCP工具获取最新信息。\n\n请重新提问，我将立即调用相关工具为您查询。'
+            ? '🚫 **强制MCP工具调用**\n\n系统检测到您的查询涉及实时数据（工作、任务、日程等）。根据强制要求，我必须调用MCP工具获取最新信息，而不能基于记忆回答。\n\n🔄 **请重新提问**，我将立即调用相关工具为您查询最新数据。\n\n💡 **提示**：系统会自动识别数据相关查询并强制调用工具，确保信息准确性。'
             : '⚠️ **强制流程控制触发**\n\n检测到您尝试基于记忆回答问题。根据系统设置，智慧办公助手必须调用MCP工具获取实时数据。\n\n请重新提问，我将调用相关工具为您获取最新信息。'
           
           // 强制完成当前消息并显示错误
