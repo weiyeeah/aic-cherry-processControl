@@ -354,10 +354,18 @@ const fetchAndProcessAssistantResponseWithRetry = async (
           const firstBlock = messageBlocks[firstBlockId]
           
           if (firstBlock && 'content' in firstBlock) {
-            const originalContent = firstBlock.content || ''
-            const modifiedContent = retryCount === 0 
-              ? `请调用工具。${originalContent}`
-              : `请务必调用工具获取实时数据。${originalQuery || originalContent}`
+            // 使用originalQuery作为基础内容，如果没有则使用当前内容
+            let baseContent = originalQuery || firstBlock.content || ''
+            
+            // 清理已有的工具指令前缀，避免重复添加
+            baseContent = baseContent
+              .replace(/^请调用工具。/, '')
+              .replace(/^请务必调用工具获取实时数据。/, '')
+              .trim()
+            
+            const modifiedContent = `请务必调用工具获取实时数据。${baseContent}`
+            
+            console.log(`[强制流程控制] 重试第${retryCount + 1}次，修改用户查询为: "${modifiedContent.substring(0, 100)}..."`)
             
             // 更新消息块内容
             dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
@@ -432,22 +440,9 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 保存原始用户查询（用于重试）
         originalUserQuery = userQuery
         
-        // 检查是否是数据相关查询（需要调用MCP工具的关键词）
-        const dataRelatedKeywords = [
-          '查询', '查看', '工作', '任务', '日程', '进度', '状态', '数据', 
-          '表格', '记录', '情况', '完成', '安排', '计划', '时间', 
-          '周', '今天', '明天', '昨天', '月','团队', '成员', 
-          '负责', '责任', '协调', '问题','日','插入', '删除', '更新'
-        ]
-        
-        const isDataQuery = dataRelatedKeywords.some(keyword => userQuery.toLowerCase().includes(keyword))
-        
-        if (isDataQuery) {
-          forcedToolCallRequired = true
-          console.log('[强制流程控制] 检测到数据相关查询，将强制要求调用MCP工具:', userQuery.substring(0, 100))
-        } else {
-          console.log('[强制流程控制] 非数据查询，允许正常回答:', userQuery.substring(0, 100))
-        }
+        // 智慧办公助手强制要求所有询问都调用MCP工具
+        forcedToolCallRequired = true
+        console.log('[强制流程控制] 智慧办公助手强制要求所有询问都调用MCP工具:', userQuery.substring(0, 100))
       }
     }
   }
@@ -547,15 +542,14 @@ const fetchAndProcessAssistantResponseImpl = async (
         textLength += text.length
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
-        // 对于强制要求调用工具的查询，设置极低阈值(15字符)几乎立即中断并重试
-        const textThreshold = forcedToolCallRequired ? 15 : 80
+        // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
+        const textThreshold = 15
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
-          const warningType = forcedToolCallRequired ? '数据相关查询' : '检测到的查询'
-          console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答${warningType}，准备自动重试`)
+          console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
           console.log(`[强制流程控制] 检测状态: hasToolCall=${hasToolCall}, hasMCPToolCall=${hasMCPToolCall}, forcedToolCallRequired=${forcedToolCallRequired}`)
           
-          // 如果是需要强制调用工具的查询且未达到最大重试次数，抛出重试错误
-          if (forcedToolCallRequired && currentRetryCount < 10) {
+          // 智慧办公助手所有查询都强制调用工具，未达到最大重试次数时抛出重试错误
+          if (currentRetryCount < 10) {
             // 显示"请稍等"提示
             const waitingText = '⏳ **请稍等**\n\n正在自动重新尝试调用工具获取实时数据...'
             
@@ -586,7 +580,7 @@ const fetchAndProcessAssistantResponseImpl = async (
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
             throw retryError
-          } else if (forcedToolCallRequired && currentRetryCount >= 10) {
+          } else if (currentRetryCount >= 10) {
             // 达到最大重试次数，显示最终错误
             const errorText = '❌ **无法获取实时数据**\n\n经过多次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
             
@@ -610,8 +604,8 @@ const fetchAndProcessAssistantResponseImpl = async (
             dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
             return
           } else {
-            // 非强制工具调用的普通查询，显示警告但继续处理
-            console.warn('[强制流程控制] 智慧办公助手未调用工具，但这是普通查询，继续处理')
+            // 这种情况理论上不应该发生，因为所有查询都是强制的
+            console.warn('[强制流程控制] 意外情况：未满足重试条件但也未达到最大重试次数')
           }
         }
         
@@ -724,11 +718,13 @@ const fetchAndProcessAssistantResponseImpl = async (
         hasToolCall = true
         
         // 检测是否是真正的MCP工具调用（而不是其他类型的工具）
-        if (toolResponse.tool && toolResponse.tool.name) {
+        if (toolResponse.tool && toolResponse.tool.name && toolResponse.status === 'invoking') {
           hasMCPToolCall = true
           if (isOfficeAssistant) {
-            console.log('[强制流程控制] 智慧办公助手正在调用MCP工具:', toolResponse.tool.name)
+            console.log('[强制流程控制] 智慧办公助手正在调用MCP工具:', toolResponse.tool.name, '状态:', toolResponse.status)
           }
+        } else if (isOfficeAssistant && toolResponse.tool) {
+          console.log('[强制流程控制] 检测到工具调用但状态不是invoking:', toolResponse.tool.name, '状态:', toolResponse.status)
         }
         
         if (initialPlaceholderBlockId) {
@@ -761,11 +757,11 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 确保已调用工具的标记
         hasToolCall = true
         
-        // 只有工具调用成功完成才认为是有效的MCP调用
-        if (toolResponse.tool && toolResponse.tool.name && toolResponse.status === 'done') {
+        // MCP工具调用完成检测（无论成功还是错误，都认为已经调用了工具）
+        if (toolResponse.tool && toolResponse.tool.name && (toolResponse.status === 'done' || toolResponse.status === 'error')) {
           hasMCPToolCall = true
           if (isOfficeAssistant) {
-            console.log('[强制流程控制] 智慧办公助手MCP工具调用成功完成:', toolResponse.tool.name)
+            console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status)
           }
         } else if (isOfficeAssistant) {
           console.log('[强制流程控制] 智慧办公助手工具调用状态:', toolResponse.status, '工具:', toolResponse.tool?.name)
@@ -1104,6 +1100,28 @@ export const sendMessage =
         queue.add(async () => {
           // 对智慧办公助手使用重试包装器
           if (assistant.name === '智慧办公助手') {
+            // 智慧办公助手：在第一次请求就加上调用工具指令
+            const state = getState()
+            const userMessageId = assistantMessage.askId
+            if (userMessageId) {
+              const userMessage = state.messages.entities[userMessageId]
+              if (userMessage && userMessage.blocks.length > 0) {
+                const messageBlocks = state.messageBlocks.entities
+                const firstBlockId = userMessage.blocks[0]
+                const firstBlock = messageBlocks[firstBlockId]
+                
+                if (firstBlock && 'content' in firstBlock) {
+                  const originalContent = firstBlock.content || ''
+                  // 检查是否已经包含工具调用指令，避免重复添加
+                  if (!originalContent.startsWith('请调用工具')) {
+                    const modifiedContent = `请调用工具。${originalContent}`
+                    dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
+                    console.log('[强制流程控制] 已在用户查询前添加工具调用指令')
+                  }
+                }
+              }
+            }
+            
             await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, undefined, 0)
           } else {
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
