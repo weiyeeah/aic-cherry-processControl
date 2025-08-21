@@ -341,11 +341,13 @@ export class ForcedMCPService {
     // 如果工具有输入模式，尝试填充基本值
     if (tool.inputSchema && tool.inputSchema.properties) {
       Object.keys(tool.inputSchema.properties).forEach(key => {
-        const property = tool.inputSchema.properties[key]
-        if (property.type === 'string') {
-          args[key] = query.substring(0, 100) // 使用查询的前100个字符
-        } else if (property.type === 'object') {
-          args[key] = {}
+        const property = tool.inputSchema.properties[key] as any
+        if (property && typeof property === 'object' && 'type' in property) {
+          if (property.type === 'string') {
+            args[key] = query.substring(0, 100) // 使用查询的前100个字符
+          } else if (property.type === 'object') {
+            args[key] = {}
+          }
         }
       })
     }
