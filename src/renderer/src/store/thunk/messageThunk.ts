@@ -497,9 +497,9 @@ const fetchAndProcessAssistantResponseImpl = async (
     if (forcedToolCallRequired) {
       setTimeout(() => {
         if (!hasToolCall) {
-          console.warn('[强制流程控制] 8秒内未检测到MCP工具调用，可能需要强制中断')
+          console.warn('[强制流程控制] 10秒内未检测到MCP工具调用，可能需要强制中断')
         }
-      }, 8000)
+      }, 10000)
     }
 
     let accumulatedContent = ''
@@ -586,7 +586,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
         // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
-        const textThreshold = 15
+        const textThreshold = 50
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
           console.log(`[强制流程控制] 检测状态详情:`, {
