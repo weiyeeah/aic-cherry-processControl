@@ -497,9 +497,9 @@ const fetchAndProcessAssistantResponseImpl = async (
     if (forcedToolCallRequired) {
       setTimeout(() => {
         if (!hasToolCall) {
-          console.warn('[强制流程控制] 10秒内未检测到MCP工具调用，可能需要强制中断')
+          console.warn('[强制流程控制] 30秒内未检测到MCP工具调用，可能需要强制中断')
         }
-      }, 10000)
+      }, 30000)
     }
 
     let accumulatedContent = ''

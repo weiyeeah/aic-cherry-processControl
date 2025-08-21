@@ -39,7 +39,12 @@ const AssistantPromptSettings: React.FC<Props> = ({ assistant, updateAssistant }
   }, [prompt])
 
   const onUpdate = () => {
-    const _assistant = { ...assistant, name: name.trim(), emoji, prompt }
+    const _assistant = { 
+      ...assistant, 
+      name: assistant.id === 'default' ? '智慧办公助手' : name.trim(), 
+      emoji, 
+      prompt 
+    }
     updateAssistant(_assistant)
   }
 
@@ -92,6 +97,8 @@ const AssistantPromptSettings: React.FC<Props> = ({ assistant, updateAssistant }
           onChange={(e) => setName(e.target.value)}
           onBlur={onUpdate}
           style={{ flex: 1 }}
+          disabled={assistant.id === 'default'}
+          title={assistant.id === 'default' ? '默认助手名称不可修改' : undefined}
         />
       </HStack>
       <SettingDivider />
