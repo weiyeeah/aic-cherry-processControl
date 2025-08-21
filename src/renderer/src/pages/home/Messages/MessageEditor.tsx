@@ -215,55 +215,9 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
             key={block.id}
             ref={textareaRef}
             variant="borderless"
-            value={message.role === 'user' 
-              ? block.content
-                  .replace(/^请调用工具。/, '')
-                  .replace(/^请务必调用工具获取实时数据。/, '')
-                  .replace(/^重要：必须调用MCP工具！/, '')
-                  .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
-                  .replace(/^强制要求：立即调用工具获取数据！/, '')
-                  .trim()
-              : block.content
-            }
+            value={block.content}
             onChange={(e) => {
-              // 在保存时，如果是用户消息且内容不以工具指令开头，需要检查是否需要添加回去
-              const newValue = e.target.value
-              let valueToSave = newValue
-              
-              if (message.role === 'user') {
-                // 查找原始内容中的工具指令前缀
-                let originalContent = ''
-                for (const b of allBlocks) {
-                  if (b.id === block.id && 'content' in b) {
-                    originalContent = typeof b.content === 'string' ? b.content : ''
-                    break
-                  }
-                }
-                const toolPrefixes = [
-                  '请调用工具。',
-                  '请务必调用工具获取实时数据。',
-                  '重要：必须调用MCP工具！',
-                  '警告：禁止使用记忆，必须调用工具！',
-                  '强制要求：立即调用工具获取数据！'
-                ]
-                
-                const hasToolPrefix = toolPrefixes.some(prefix => originalContent.indexOf(prefix) === 0)
-                const userAddedPrefix = toolPrefixes.some(prefix => newValue.indexOf(prefix) === 0)
-                
-                // 如果原来有工具指令但用户输入没有，则添加回去
-                if (hasToolPrefix && !userAddedPrefix) {
-                  let originalPrefix = ''
-                  for (const prefix of toolPrefixes) {
-                    if (originalContent.indexOf(prefix) === 0) {
-                      originalPrefix = prefix
-                      break
-                    }
-                  }
-                  valueToSave = originalPrefix + newValue
-                }
-              }
-              
-              handleTextChange(block.id, valueToSave)
+              handleTextChange(block.id, e.target.value)
               resizeTextArea()
             }}
             onKeyDown={(e) => handleKeyDown(e, block.id)}
