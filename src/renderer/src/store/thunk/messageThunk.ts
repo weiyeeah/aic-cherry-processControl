@@ -284,7 +284,7 @@ const saveUpdatedBlockToDB = async (
 /**
  * 创建MCP工具调用的回调函数，用于预调用时的UI更新
  */
-const createMCPCallbacks = (dispatch: AppDispatch, getState: () => RootState, topicId: string, assistantMsgId: string) => {
+const createMCPCallbacks = (_dispatch: AppDispatch, _getState: () => RootState, _topicId: string, _assistantMsgId: string) => {
   return {
     onToolCallInProgress: (toolResponse: MCPToolResponse) => {
       // 这里重用fetchAndProcessAssistantResponseImpl中的工具调用逻辑

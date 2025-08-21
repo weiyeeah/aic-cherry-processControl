@@ -1,4 +1,3 @@
-import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import type { Assistant, MCPServer, MCPTool, MCPToolResponse } from '@renderer/types'
 import { callMCPTool } from '@renderer/utils/mcp-tools'
 import { uuid } from '@renderer/utils'
@@ -83,7 +82,7 @@ export class ForcedMCPService {
     for (const server of servers) {
       try {
         console.log('[ForcedMCPService] 获取服务器工具:', server.name)
-        const tools = await window.api.mcp.listTools({ server })
+        const tools = await window.api.mcp.listTools(server)
         
         if (tools && tools.length > 0) {
           // 为工具添加服务器信息
@@ -134,7 +133,7 @@ export class ForcedMCPService {
         // 触发UI回调 - 工具调用开始
         if (streamProcessor) {
           streamProcessor({
-            type: 'mcp_tool_in_progress',
+            type: 'mcp_tool_in_progress' as any,
             responses: [toolResponse]
           })
         }
@@ -152,7 +151,7 @@ export class ForcedMCPService {
         // 触发UI回调 - 工具调用完成
         if (streamProcessor) {
           streamProcessor({
-            type: 'mcp_tool_complete',
+            type: 'mcp_tool_complete' as any,
             responses: [completedResponse]
           })
         }
@@ -166,7 +165,7 @@ export class ForcedMCPService {
         // 触发UI回调 - 工具调用失败
         if (streamProcessor) {
           streamProcessor({
-            type: 'mcp_tool_complete',
+            type: 'mcp_tool_complete' as any,
             responses: [{
               id: uuid(),
               tool,
@@ -181,9 +180,25 @@ export class ForcedMCPService {
       }
     })
 
-    // 等待所有工具调用完成
-    const toolResults = await Promise.all(toolPromises)
-    results.push(...toolResults.filter(result => result !== null))
+    // 等待所有工具调用完成 
+    // 使用兼容性更好的方式处理Promise.all
+    const toolResults: Array<{ tool: MCPTool; result: any; arguments: any } | null> = []
+    for (const promise of toolPromises) {
+      try {
+        const result = await promise
+        toolResults.push(result)
+      } catch (error) {
+        console.error('[ForcedMCPService] 工具调用Promise失败:', error)
+        toolResults.push(null)
+      }
+    }
+    
+    // 过滤掉null结果
+    for (const result of toolResults) {
+      if (result !== null) {
+        results.push(result)
+      }
+    }
 
     return results
   }
@@ -214,8 +229,8 @@ export class ForcedMCPService {
 
         case 'get_week_number':
           // 涉及周数的查询
-          if (lowerQuery.includes('周') || lowerQuery.includes('week') || 
-              lowerQuery.includes('本周') || lowerQuery.includes('上周') || lowerQuery.includes('下周')) {
+          if (lowerQuery.indexOf('周') !== -1 || lowerQuery.indexOf('week') !== -1 || 
+              lowerQuery.indexOf('本周') !== -1 || lowerQuery.indexOf('上周') !== -1 || lowerQuery.indexOf('下周') !== -1) {
             shouldCall = true
             toolArguments = { date: new Date().toISOString().split('T')[0] }
           }
@@ -223,8 +238,8 @@ export class ForcedMCPService {
 
         case 'list_teable_records':
           // 数据查询相关
-          if (lowerQuery.includes('查询') || lowerQuery.includes('工作') || lowerQuery.includes('任务') || 
-              lowerQuery.includes('计划') || lowerQuery.includes('情况') || lowerQuery.includes('状态')) {
+          if (lowerQuery.indexOf('查询') !== -1 || lowerQuery.indexOf('工作') !== -1 || lowerQuery.indexOf('任务') !== -1 || 
+              lowerQuery.indexOf('计划') !== -1 || lowerQuery.indexOf('情况') !== -1 || lowerQuery.indexOf('状态') !== -1) {
             shouldCall = true
             // 这里需要LLM来决定具体参数，暂时使用一个通用的查询
             toolArguments = this.generateTableQueryArguments(lowerQuery)
@@ -234,8 +249,8 @@ export class ForcedMCPService {
         case 'get_table_list':
         case 'Get Teable Table List':
           // 获取表格列表，用于其他查询的基础
-          if (lowerQuery.includes('表') || lowerQuery.includes('数据') || 
-              lowerQuery.includes('查询') || lowerQuery.includes('工作')) {
+          if (lowerQuery.indexOf('表') !== -1 || lowerQuery.indexOf('数据') !== -1 || 
+              lowerQuery.indexOf('查询') !== -1 || lowerQuery.indexOf('工作') !== -1) {
             shouldCall = true
             toolArguments = {}
           }
@@ -262,9 +277,15 @@ export class ForcedMCPService {
     if (selectedTools.length === 0) {
       const basicTools = ['get_current_date', 'get_table_list', 'Get Teable Table List']
       for (const toolName of basicTools) {
-        const tool = availableTools.find(t => (t.name || t.id) === toolName)
-        if (tool) {
-          selectedTools.push({ tool, toolName, arguments: {} })
+        let foundTool: MCPTool | undefined = undefined
+        for (const t of availableTools) {
+          if ((t.name || t.id) === toolName) {
+            foundTool = t
+            break
+          }
+        }
+        if (foundTool) {
+          selectedTools.push({ tool: foundTool, toolName, arguments: {} })
           break // 只添加一个基础工具
         }
       }
@@ -347,7 +368,8 @@ export class ForcedMCPService {
       contextData += `**返回结果**:\n`
       
       if (result && result.content) {
-        result.content.forEach((content: any) => {
+              result.content.forEach((content: any) => {
+        if (content && typeof content === 'object' && 'type' in content) {
           if (content.type === 'text') {
             contextData += content.text + '\n'
           } else if (content.type === 'json') {
@@ -355,7 +377,10 @@ export class ForcedMCPService {
           } else {
             contextData += `[${content.type} content]\n`
           }
-        })
+        } else {
+          contextData += `[unknown content format]\n`
+        }
+      })
       } else {
         contextData += JSON.stringify(result, null, 2) + '\n'
       }
