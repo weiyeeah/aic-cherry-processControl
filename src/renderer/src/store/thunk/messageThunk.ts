@@ -336,7 +336,6 @@ const compressContextForOfficeAssistant = async (
   
   // 计算上下文总token数（粗略估算：中文1字符≈1token，英文1单词≈1token）
   let totalTokens = 0
-  const TOKEN_LIMIT = 8000 // 设置合理的token限制
   const COMPRESSION_THRESHOLD = 6000 // 超过此阈值开始压缩
   
   for (const message of messages) {
@@ -405,7 +404,7 @@ const compressContextForOfficeAssistant = async (
       assistantId: lastUserMessage.assistantId || '',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      status: 'success',
+      status: AssistantMessageStatus.PENDING,
       blocks: []
     }
     
@@ -457,7 +456,6 @@ const smartCompressContext = async (content: string, originalTokens: number): Pr
 // 关键信息提取压缩
 const extractKeyInformation = (content: string): string => {
   const lines = content.split('\n').filter(line => line.trim())
-  const importantLines: string[] = []
   const keywordGroups = {
     work: ['工作','计划', '任务', '完成情况', '进度'],
     meeting: ['周会', '会议', '布置'],
@@ -570,8 +568,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
     await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount)
   } catch (error: any) {
     // 如果是需要重试的错误，进行完整的重新发送
-    if (error.shouldRetry && retryCount < 10) {
-      console.log(`[强制流程控制] 准备重新发送消息，当前重试次数: ${retryCount + 1}/10`)
+    if (error.shouldRetry && retryCount < 5) {
+      console.log(`[强制流程控制] 准备重新发送消息，当前重试次数: ${retryCount + 1}/5`)
       
       const state = getState()
       const userMessageId = assistantMessage.askId
@@ -729,9 +727,31 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 保存原始用户查询（用于重试）
         originalUserQuery = userQuery
         
-        // 智慧办公助手强制要求所有询问都调用MCP工具
-        forcedToolCallRequired = true
-        console.log('[强制流程控制] 智慧办公助手强制要求所有询问都调用MCP工具:', userQuery.substring(0, 100))
+        // 检查是否是需要调用MCP工具的查询
+        const needsMCPTool = (
+          userQuery.includes('查询') ||
+          userQuery.includes('工作计划') ||
+          userQuery.includes('任务') ||
+          userQuery.includes('进度') ||
+          userQuery.includes('完成情况') ||
+          userQuery.includes('团队') ||
+          userQuery.includes('周数') ||
+          userQuery.includes('时间') ||
+          userQuery.includes('日期') ||
+          userQuery.includes('表格') ||
+          userQuery.includes('数据') ||
+          userQuery.includes('添加') ||
+          userQuery.includes('更新') ||
+          userQuery.includes('插入') ||
+          userQuery.includes('删除')
+        )
+        
+        forcedToolCallRequired = needsMCPTool
+        console.log('[强制流程控制] 查询分析结果:', {
+          userQuery: userQuery.substring(0, 100),
+          needsMCPTool,
+          forcedToolCallRequired
+        })
       }
     }
   }
@@ -837,8 +857,8 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         // 智慧办公助手强制流程控制：检测未调用MCP工具的文本生成
         // 使用更合理的阈值，确保能检测到真正的文本生成而非工具调用过程
-        const textThreshold = 50
-        if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
+        const textThreshold = 100 // 提高阈值，避免误判
+        if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold && forcedToolCallRequired) {
           console.warn(`[强制流程控制] 智慧办公助手在未调用MCP工具情况下生成文本，准备自动重试`)
           console.log(`[强制流程控制] 检测状态详情:`, {
             hasToolCall,
@@ -852,7 +872,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           })
           
           // 智慧办公助手必须调用MCP工具，未达到最大重试次数时自动重试
-          if (currentRetryCount < 10) {
+          if (currentRetryCount < 5) { // 减少最大重试次数，避免无限循环
             // 显示"请稍等"提示（更简洁）
             const waitingText = '⏳ 重新尝试获取实时数据...'
             
@@ -1020,34 +1040,50 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 任何工具调用都标记为hasToolCall
         hasToolCall = true
         
-        // 更宽松的MCP工具检测条件，检测到任何工具调用就算成功
+        // 严格的MCP工具检测条件，必须有明确的工具信息
         if (toolResponse.tool && toolResponse.tool.name) {
-          hasMCPToolCall = true
+          // 检查是否是MCP相关的工具调用
+          const isMCPTool = (
+            toolResponse.tool.serverId === 'teable-server' || 
+            toolResponse.tool.serverId === 'date-server' ||
+            toolResponse.tool.serverName === 'teable-server' ||
+            toolResponse.tool.serverName === 'date-server' ||
+            toolResponse.tool.name.includes('teable') ||
+            toolResponse.tool.name.includes('date') ||
+            toolResponse.tool.name.includes('get_current_date') ||
+            toolResponse.tool.name.includes('get_week_number') ||
+            toolResponse.tool.name.includes('list_teable_records')
+          )
           
-          if (isOfficeAssistant) {
-            console.log('[强制流程控制] ✅ 智慧办公助手检测到MCP工具调用:', {
-              toolName: toolResponse.tool.name,
-              status: toolResponse.status,
-              id: toolResponse.id,
-              serverId: toolResponse.tool.serverId,
-              serverName: toolResponse.tool.serverName,
-              retryCount: currentRetryCount
-            })
-          }
-        } else {
-          // 即使没有工具信息，只要有status也可能是MCP调用
-          if (toolResponse.status === 'invoking' || toolResponse.status === 'processing') {
+          if (isMCPTool) {
             hasMCPToolCall = true
-            hasToolCall = true
             
             if (isOfficeAssistant) {
-              console.log('[强制流程控制] ✅ 智慧办公助手检测到工具状态:', {
+              console.log('[强制流程控制] ✅ 智慧办公助手检测到MCP工具调用:', {
+                toolName: toolResponse.tool.name,
                 status: toolResponse.status,
                 id: toolResponse.id,
-                retryCount: currentRetryCount
+                serverId: toolResponse.tool.serverId,
+                serverName: toolResponse.tool.serverName,
+                retryCount: currentRetryCount,
+                isMCPTool: true
               })
             }
-          } else if (isOfficeAssistant) {
+          } else {
+            if (isOfficeAssistant) {
+              console.log('[强制流程控制] ⚠️ 检测到非MCP工具调用:', {
+                toolName: toolResponse.tool.name,
+                status: toolResponse.status,
+                id: toolResponse.id,
+                serverId: toolResponse.tool.serverId,
+                serverName: toolResponse.tool.serverName,
+                retryCount: currentRetryCount,
+                isMCPTool: false
+              })
+            }
+          }
+        } else {
+          if (isOfficeAssistant) {
             console.warn('[强制流程控制] ❌ 检测到工具调用但缺少关键信息:', {
               status: toolResponse.status,
               hasTool: !!toolResponse.tool,
@@ -1090,39 +1126,53 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 确保工具调用标记
         hasToolCall = true
         
-        // 更宽松的MCP工具调用完成检测
+        // 严格的MCP工具调用完成检测
         if (toolResponse.tool && toolResponse.tool.name) {
-          hasMCPToolCall = true
+          // 检查是否是MCP相关的工具调用
+          const isMCPTool = (
+            toolResponse.tool.serverId === 'teable-server' || 
+            toolResponse.tool.serverId === 'date-server' ||
+            toolResponse.tool.serverName === 'teable-server' ||
+            toolResponse.tool.serverName === 'date-server' ||
+            toolResponse.tool.name.includes('teable') ||
+            toolResponse.tool.name.includes('date') ||
+            toolResponse.tool.name.includes('get_current_date') ||
+            toolResponse.tool.name.includes('get_week_number') ||
+            toolResponse.tool.name.includes('list_teable_records')
+          )
           
-          if (isOfficeAssistant) {
-            console.log('[强制流程控制] ✅ 智慧办公助手工具调用完成:', {
-              toolName: toolResponse.tool.name,
-              status: toolResponse.status,
-              id: toolResponse.id,
-              hasResponse: !!toolResponse.response,
-              responseType: typeof toolResponse.response,
-              responsePreview: toolResponse.response ? 
-                (typeof toolResponse.response === 'string' ? 
-                  toolResponse.response.substring(0, 100) + '...' : 
-                  'object-type') : 'no-response',
-              retryCount: currentRetryCount
-            })
-          }
-        } else {
-          // 即使没有工具信息，只要状态为完成也算成功
-          if (toolResponse.status === 'done' || toolResponse.status === 'error' || toolResponse.status === 'success') {
+          if (isMCPTool) {
             hasMCPToolCall = true
-            hasToolCall = true
             
             if (isOfficeAssistant) {
-              console.log('[强制流程控制] ✅ 智慧办公助手检测到工具完成状态:', {
+              console.log('[强制流程控制] ✅ 智慧办公助手MCP工具调用完成:', {
+                toolName: toolResponse.tool.name,
                 status: toolResponse.status,
                 id: toolResponse.id,
                 hasResponse: !!toolResponse.response,
-                retryCount: currentRetryCount
+                responseType: typeof toolResponse.response,
+                responsePreview: toolResponse.response ? 
+                  (typeof toolResponse.response === 'string' ? 
+                    toolResponse.response.substring(0, 100) + '...' : 
+                    'object-type') : 'no-response',
+                retryCount: currentRetryCount,
+                isMCPTool: true
               })
             }
-          } else if (isOfficeAssistant) {
+          } else {
+            if (isOfficeAssistant) {
+              console.log('[强制流程控制] ⚠️ 非MCP工具调用完成:', {
+                toolName: toolResponse.tool.name,
+                status: toolResponse.status,
+                id: toolResponse.id,
+                hasResponse: !!toolResponse.response,
+                retryCount: currentRetryCount,
+                isMCPTool: false
+              })
+            }
+          }
+        } else {
+          if (isOfficeAssistant) {
             console.warn('[强制流程控制] ❌ 工具调用完成但缺少关键信息:', {
               status: toolResponse.status,
               hasTool: !!toolResponse.tool,
@@ -1346,8 +1396,8 @@ const fetchAndProcessAssistantResponseImpl = async (
             currentRetryCount
           })
           
-          // 如果是智慧办公助手但没有调用MCP工具，触发重试
-          if (!hasMCPToolCall && currentRetryCount < 10) {
+          // 如果是智慧办公助手但没有调用MCP工具，且是强制要求的查询，触发重试
+          if (!hasMCPToolCall && forcedToolCallRequired && currentRetryCount < 5) {
             console.warn(`[强制流程控制] 响应完成但未检测到MCP工具调用，准备重试`)
             
             // 显示重试提示
@@ -1374,7 +1424,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           }
           
           // 如果达到最大重试次数仍未调用工具
-          if (!hasMCPToolCall && currentRetryCount >= 10) {
+          if (!hasMCPToolCall && forcedToolCallRequired && currentRetryCount >= 5) {
             console.error(`[强制流程控制] 达到最大重试次数，仍未检测到MCP工具调用`)
             
             const errorText = '❌ **无法获取实时数据**\n\n经过多次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
