@@ -90,6 +90,10 @@ const AssistantSettings: FC = () => {
   }
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // 如果是默认助手（智慧办公助手），禁止修改名称
+    if (defaultAssistant.id === 'default') {
+      return
+    }
     const newName = e.target.value
     setName(newName)
     updateDefaultAssistant({ ...defaultAssistant, name: newName })
@@ -126,6 +130,7 @@ const AssistantSettings: FC = () => {
           placeholder={t('common.assistant') + t('common.name')}
           value={name}
           onChange={handleNameChange}
+          disabled={defaultAssistant.id === 'default'}
           style={{ flex: 1 }}
         />
       </HStack>
