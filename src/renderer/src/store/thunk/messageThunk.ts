@@ -318,7 +318,7 @@ const dispatchMultiModelResponses = async (
   const queue = getTopicQueue(topicId)
   for (const task of tasksToQueue) {
     queue.add(async () => {
-      await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, task.assistantConfig, task.messageStub)
+      await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, task.assistantConfig, task.messageStub, undefined, 0)
     })
   }
 }
@@ -568,8 +568,9 @@ const fetchAndProcessAssistantResponseWithRetry = async (
     await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount)
   } catch (error: any) {
     // 如果是需要重试的错误，进行完整的重新发送
-    if (error.shouldRetry && retryCount < 5) {
-      console.log(`[强制流程控制] 准备重新发送消息，当前重试次数: ${retryCount + 1}/5`)
+    const nextRetryCount = error.nextRetryCount || (retryCount + 1)
+    if (error.shouldRetry && nextRetryCount <= 5) {
+      console.log(`[强制流程控制] 准备重新发送消息，当前重试次数: ${nextRetryCount}/5`)
       
       const state = getState()
       const userMessageId = assistantMessage.askId
@@ -607,10 +608,10 @@ const fetchAndProcessAssistantResponseWithRetry = async (
               '强制要求：立即调用工具获取数据！'
             ]
             
-            const instructionIndex = Math.min(retryCount, toolInstructions.length - 1)
+            const instructionIndex = Math.min(nextRetryCount - 1, toolInstructions.length - 1)
             const modifiedContent = `${toolInstructions[instructionIndex]}${baseContent}`
             
-            console.log(`[强制流程控制] 重试第${retryCount + 1}次，使用指令: "${toolInstructions[instructionIndex]}"`)
+            console.log(`[强制流程控制] 重试第${nextRetryCount}次，使用指令: "${toolInstructions[instructionIndex]}"`)
             
             // 更新用户消息内容
             dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
@@ -623,7 +624,7 @@ const fetchAndProcessAssistantResponseWithRetry = async (
           
           // 2. 延迟后触发完整的消息重新生成流程（减少上下文干扰）
           setTimeout(() => {
-            console.log(`[强制流程控制] 开始第${retryCount + 1}次重试，重新生成助手响应`)
+            console.log(`[强制流程控制] 开始第${nextRetryCount}次重试，重新生成助手响应`)
             console.log(`[强制流程控制] 重试策略: 减少上下文长度以强制工具调用`)
             
             // 重置助手消息并重新开始生成流程
@@ -657,7 +658,7 @@ const fetchAndProcessAssistantResponseWithRetry = async (
             console.log(`[强制流程控制] 重试配置: contextCount=${retryAssistant.settings?.contextCount}`)
             
             // 重新开始生成流程（带重试计数和减少的上下文）
-            fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, retryAssistant, resetAssistantMsg, originalUserContent, retryCount + 1)
+            fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, retryAssistant, resetAssistantMsg, originalUserContent, nextRetryCount)
           }, 2000) // 减少延迟到2秒，快速重试
           
           return // 防止继续执行
@@ -727,31 +728,9 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 保存原始用户查询（用于重试）
         originalUserQuery = userQuery
         
-        // 检查是否是需要调用MCP工具的查询
-        const needsMCPTool = (
-          userQuery.includes('查询') ||
-          userQuery.includes('工作计划') ||
-          userQuery.includes('任务') ||
-          userQuery.includes('进度') ||
-          userQuery.includes('完成情况') ||
-          userQuery.includes('团队') ||
-          userQuery.includes('周数') ||
-          userQuery.includes('时间') ||
-          userQuery.includes('日期') ||
-          userQuery.includes('表格') ||
-          userQuery.includes('数据') ||
-          userQuery.includes('添加') ||
-          userQuery.includes('更新') ||
-          userQuery.includes('插入') ||
-          userQuery.includes('删除')
-        )
-        
-        forcedToolCallRequired = needsMCPTool
-        console.log('[强制流程控制] 查询分析结果:', {
-          userQuery: userQuery.substring(0, 100),
-          needsMCPTool,
-          forcedToolCallRequired
-        })
+        // 智慧办公助手强制要求所有询问都调用MCP工具
+        forcedToolCallRequired = true
+        console.log('[强制流程控制] 智慧办公助手强制要求所有询问都调用MCP工具:', userQuery.substring(0, 100))
       }
     }
   }
@@ -898,10 +877,11 @@ const fetchAndProcessAssistantResponseImpl = async (
               console.warn('[强制流程控制] AbortController中断失败:', error)
             }
             
-            // 抛出重试错误
+            // 抛出重试错误，递增重试计数
             const retryError: any = new Error('智慧办公助手必须调用MCP工具获取实时数据')
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
+            retryError.nextRetryCount = currentRetryCount + 1
             throw retryError
           } else {
             // 达到最大重试次数，显示最终错误
@@ -1416,10 +1396,11 @@ const fetchAndProcessAssistantResponseImpl = async (
               }))
             }
             
-            // 抛出重试错误
+            // 抛出重试错误，递增重试计数
             const retryError: any = new Error('智慧办公助手必须调用MCP工具获取实时数据')
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
+            retryError.nextRetryCount = currentRetryCount + 1
             throw retryError
           }
           
@@ -1614,7 +1595,7 @@ export const sendMessage =
             
             await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
           } else {
-            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
           }
         })
       }
@@ -1861,7 +1842,7 @@ export const resendMessageThunk =
           ...(resetMsg.model ? { model: resetMsg.model } : {})
         }
         queue.add(async () => {
-          await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
+          await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg, undefined, 0)
         })
       }
     } catch (error) {
@@ -1969,7 +1950,9 @@ export const regenerateAssistantResponseThunk =
           getState,
           topicId,
           assistantConfigForRegen,
-          resetAssistantMsg
+          resetAssistantMsg,
+          undefined,
+          0
         )
       })
     } catch (error) {
@@ -2140,7 +2123,9 @@ export const appendAssistantResponseThunk =
           getState,
           topicId,
           assistantConfigForThisCall,
-          newAssistantStub // Pass the newly created stub
+          newAssistantStub, // Pass the newly created stub
+          undefined,
+          0
         )
       })
     } catch (error) {
