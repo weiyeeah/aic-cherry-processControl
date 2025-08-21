@@ -235,7 +235,7 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
                 let originalContent = ''
                 for (const b of allBlocks) {
                   if (b.id === block.id && 'content' in b) {
-                    originalContent = b.content || ''
+                    originalContent = typeof b.content === 'string' ? b.content : ''
                     break
                   }
                 }
@@ -247,14 +247,14 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
                   '强制要求：立即调用工具获取数据！'
                 ]
                 
-                const hasToolPrefix = toolPrefixes.some(prefix => originalContent.startsWith(prefix))
-                const userAddedPrefix = toolPrefixes.some(prefix => newValue.startsWith(prefix))
+                const hasToolPrefix = toolPrefixes.some(prefix => originalContent.indexOf(prefix) === 0)
+                const userAddedPrefix = toolPrefixes.some(prefix => newValue.indexOf(prefix) === 0)
                 
                 // 如果原来有工具指令但用户输入没有，则添加回去
                 if (hasToolPrefix && !userAddedPrefix) {
                   let originalPrefix = ''
                   for (const prefix of toolPrefixes) {
-                    if (originalContent.startsWith(prefix)) {
+                    if (originalContent.indexOf(prefix) === 0) {
                       originalPrefix = prefix
                       break
                     }
