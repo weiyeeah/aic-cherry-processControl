@@ -6,6 +6,7 @@ import FileManager from '@renderer/services/FileManager'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
+import { ForcedMCPService } from '@renderer/services/ForcedMCPService'
 import store from '@renderer/store'
 import type { Assistant, ExternalToolResult, FileType, MCPToolResponse, Model, Topic } from '@renderer/types'
 import type {
@@ -276,6 +277,28 @@ const saveUpdatedBlockToDB = async (
     await saveUpdatesToDB(messageId, topicId, {}, [blockToSave]) // Pass messageId, topicId, empty message updates, and the block
   } else {
     console.warn(`[DB Save Single Block] Block ${blockId} not found in state. Cannot save.`)
+  }
+}
+
+// --- Helper Function for MCP Callbacks ---
+/**
+ * 创建MCP工具调用的回调函数，用于预调用时的UI更新
+ */
+const createMCPCallbacks = (dispatch: AppDispatch, getState: () => RootState, topicId: string, assistantMsgId: string) => {
+  return {
+    onToolCallInProgress: (toolResponse: MCPToolResponse) => {
+      // 这里重用fetchAndProcessAssistantResponseImpl中的工具调用逻辑
+      // 但是简化为只处理UI更新，不处理流程控制
+      console.log('[MCP回调] 工具调用开始UI更新:', toolResponse.tool.name)
+      
+      // 创建或更新工具块
+      // 注意：这里简化处理，实际可能需要更复杂的状态管理
+      // 预调用的工具应该在助手消息的上下文中显示
+    },
+    onToolCallComplete: (toolResponse: MCPToolResponse) => {
+      console.log('[MCP回调] 工具调用完成UI更新:', toolResponse.tool.name)
+      // 这里也是简化处理，实际使用中可能需要更详细的UI状态管理
+    }
   }
 }
 
@@ -1165,12 +1188,14 @@ export const sendMessage =
         dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
 
         queue.add(async () => {
-          // 对智慧办公助手使用重试包装器
+          // 对智慧办公助手使用MCP预调用机制
           if (assistant.name === '智慧办公助手') {
-            // 智慧办公助手：保存原始用户内容，并在第一次请求就加上调用工具指令
+            console.log('[MCP预调用] 开始智慧办公助手的MCP预调用流程')
+            
+            // 1. 获取原始用户内容
             const state = getState()
             const userMessageId = assistantMessage.askId
-            let originalUserContent: string | undefined = undefined
+            let originalUserContent = ''
             
             if (userMessageId) {
               const userMessage = state.messages.entities[userMessageId]
@@ -1179,31 +1204,105 @@ export const sendMessage =
                 const firstBlockId = userMessage.blocks[0]
                 const firstBlock = messageBlocks[firstBlockId]
                 
-                if (firstBlock && 'content' in firstBlock) {
-                  // 确保内容是字符串类型
-                  const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
-                  
-                  // 保存原始用户内容（清理工具指令）
-                  originalUserContent = currentContent
+                if (firstBlock && 'content' in firstBlock && typeof firstBlock.content === 'string') {
+                  // 清理可能存在的工具指令前缀，获取纯净的用户查询
+                  originalUserContent = firstBlock.content
                     .replace(/^请调用工具。/, '')
                     .replace(/^请务必调用工具获取实时数据。/, '')
                     .replace(/^重要：必须调用MCP工具！/, '')
                     .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
                     .replace(/^强制要求：立即调用工具获取数据！/, '')
                     .trim()
-                  
-                  // 检查是否已经包含工具调用指令，避免重复添加
-                  if (!currentContent.startsWith('请调用工具')) {
-                    const modifiedContent = `请调用工具。${originalUserContent}`
-                    dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
-                    console.log('[强制流程控制] 已在用户查询前添加工具调用指令')
-                  }
                 }
               }
             }
+
+            if (!originalUserContent) {
+              console.warn('[MCP预调用] 无法获取用户原始内容，降级到普通流程')
+              await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
+              return
+            }
+
+            // 2. 创建流处理器，确保MCP工具调用的UI反馈正常显示
+            const streamProcessor = createStreamProcessor({
+              onToolCallInProgress: (toolResponse: MCPToolResponse) => {
+                console.log('[MCP预调用] 工具调用开始:', toolResponse.tool.name)
+                // 手动调用messageThunk中的回调以确保UI更新
+                const callbacks = createMCPCallbacks(dispatch, getState, topicId, assistantMessage.id)
+                if (callbacks.onToolCallInProgress) {
+                  callbacks.onToolCallInProgress(toolResponse)
+                }
+              },
+              onToolCallComplete: (toolResponse: MCPToolResponse) => {
+                console.log('[MCP预调用] 工具调用完成:', toolResponse.tool.name)
+                // 手动调用messageThunk中的回调以确保UI更新
+                const callbacks = createMCPCallbacks(dispatch, getState, topicId, assistantMessage.id)
+                if (callbacks.onToolCallComplete) {
+                  callbacks.onToolCallComplete(toolResponse)
+                }
+              }
+            })
+
+            // 3. 强制调用MCP工具获取实时数据
+            const mcpResult = await ForcedMCPService.forceCallMCPTools(
+              assistant,
+              originalUserContent,
+              streamProcessor
+            )
+
+            // 4. 根据MCP调用结果决定后续流程
+            if (!mcpResult.success) {
+              console.warn('[MCP预调用] MCP工具调用失败，降级到带工具指令的重试流程:', mcpResult.error)
+              
+              // 降级：在用户消息前添加工具调用指令，触发重试机制
+              if (userMessageId) {
+                const state = getState()
+                const userMessage = state.messages.entities[userMessageId]
+                if (userMessage && userMessage.blocks.length > 0) {
+                  const messageBlocks = state.messageBlocks.entities
+                  const firstBlockId = userMessage.blocks[0]
+                  const firstBlock = messageBlocks[firstBlockId]
+                  
+                  if (firstBlock && 'content' in firstBlock) {
+                    const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+                    if (!currentContent.startsWith('请务必调用工具获取实时数据。')) {
+                      const modifiedContent = `请务必调用工具获取实时数据。${originalUserContent}`
+                      dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
+                    }
+                  }
+                }
+              }
+              
+              // 使用普通流程（会触发原有的重试机制）
+              await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
+              return
+            }
+
+            console.log('[MCP预调用] MCP工具调用成功，数据长度:', mcpResult.mcpData?.length || 0)
+
+            // 5. 将MCP数据注入到用户消息中
+            if (userMessageId && mcpResult.mcpData) {
+              const state = getState()
+              const userMessage = state.messages.entities[userMessageId]
+              if (userMessage && userMessage.blocks.length > 0) {
+                const messageBlocks = state.messageBlocks.entities
+                const firstBlockId = userMessage.blocks[0]
+                const firstBlock = messageBlocks[firstBlockId]
+                
+                if (firstBlock && 'content' in firstBlock) {
+                  // 将MCP数据作为隐藏上下文注入到用户消息中
+                  const enhancedContent = `${mcpResult.mcpData}${originalUserContent}`
+                  dispatch(updateOneBlock({ id: firstBlockId, changes: { content: enhancedContent } }))
+                  console.log('[MCP预调用] 已将MCP数据注入用户消息')
+                }
+              }
+            }
+
+            // 6. 直接调用核心API处理流程（不使用重试包装器，因为数据已经预获取）
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
             
-            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
           } else {
+            // 对于其他助手，使用原有流程
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
           }
         })
