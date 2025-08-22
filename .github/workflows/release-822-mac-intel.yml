@@ -103,7 +103,8 @@ jobs:
           VERSION="${TAG#v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           # 重建原生模块以确保架构兼容性
-          yarn install --force
+          rm -rf node_modules
+          yarn install
           npx electron-rebuild
           yarn build:npm mac
           yarn build:mac
