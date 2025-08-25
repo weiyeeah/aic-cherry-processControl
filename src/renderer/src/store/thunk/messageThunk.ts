@@ -754,8 +754,9 @@ const fetchAndProcessAssistantResponseImpl = async (
       },
       onTextComplete: async (finalText) => {
         // 智慧办公助手检查是否调用了MCP工具
+        // 只有在真正没有调用MCP工具且没有通过重试检测的情况下才显示警告
         let finalTextWithWarning = finalText
-        if (isOfficeAssistant && !hasMCPToolCall && forcedToolCallRequired) {
+        if (isOfficeAssistant && !hasMCPToolCall && forcedToolCallRequired && finalText.length > 0) {
           console.warn('[强制流程控制] 智慧办公助手完成回复但未调用MCP工具，添加警告')
           finalTextWithWarning = finalText + '\n\n⚠️ **警告！没有调用工具查询实时数据，数据可能不准确，若想得到具体真实的数据，请重新输入**'
         }
@@ -840,7 +841,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           hasMCPToolCall = true
           if (isOfficeAssistant) {
             console.log('[强制流程控制] 智慧办公助手检测到MCP工具调用开始:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
-            // 清理重试计数器
+            // 清理重试计数器，表示成功调用了工具
             clearRetryCount(topicId, assistantMessage.askId || '')
           }
         } else if (isOfficeAssistant) {
@@ -887,7 +888,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           hasMCPToolCall = true
           if (isOfficeAssistant) {
             console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
-            // 确保重试计数器已清理
+            // 确保重试计数器已清理，表示成功调用了工具
             clearRetryCount(topicId, assistantMessage.askId || '')
             // 如果有响应内容，也记录一下
             if (toolResponse.response) {
