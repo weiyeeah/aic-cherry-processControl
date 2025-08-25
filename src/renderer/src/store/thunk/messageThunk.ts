@@ -753,17 +753,9 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onTextComplete: async (finalText) => {
-        // 智慧办公助手检查是否调用了MCP工具
-        // 只有在真正没有调用MCP工具且没有通过重试检测的情况下才显示警告
-        let finalTextWithWarning = finalText
-        if (isOfficeAssistant && !hasMCPToolCall && forcedToolCallRequired && finalText.length > 0) {
-          console.warn('[强制流程控制] 智慧办公助手完成回复但未调用MCP工具，添加警告')
-          finalTextWithWarning = finalText + '\n\n⚠️ **警告！没有调用工具查询实时数据，数据可能不准确，若想得到具体真实的数据，请重新输入**'
-        }
-        
         if (mainTextBlockId) {
           const changes = {
-            content: finalTextWithWarning,
+            content: finalText,
             status: MessageBlockStatus.SUCCESS
           }
           cancelThrottledBlockUpdate(mainTextBlockId)
