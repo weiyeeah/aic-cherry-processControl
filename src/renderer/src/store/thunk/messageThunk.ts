@@ -476,10 +476,56 @@ const fetchAndProcessAssistantResponseWithRetry = async (
         }
       }
       
-      // 3. 延迟后重新开始完整的API调用流程
+      // 3. 延迟后使用"点击发送"的逻辑重新发送整个消息
       setTimeout(() => {
-        console.log(`[强制流程控制] 开始第${newRetryCount}次重试，重新调用API`)
-        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent)
+        console.log(`[强制流程控制] 开始第${newRetryCount}次重试，使用重新发送逻辑`)
+        
+        // 使用重新发送的逻辑，这样会重新创建助手消息并重新处理整个流程
+        const userMessageId = assistantMessage.askId
+        if (userMessageId) {
+          const currentState = getState()
+          const userMessageToRetry = currentState.messages.entities[userMessageId]
+          
+          if (userMessageToRetry) {
+            // 删除当前的assistant消息和其blocks
+            const assistantMessageBlocks = assistantMessage.blocks || []
+            if (assistantMessageBlocks.length > 0) {
+              cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
+            }
+            dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
+            
+            // 创建新的assistant消息
+            const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
+              askId: userMessageToRetry.id,
+              model: assistant.model
+            })
+            
+            // 添加新的assistant消息到store和数据库
+            dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
+            
+            // 异步更新数据库
+            ;(async () => {
+              try {
+                // 先保存新的assistant消息
+                await saveMessageAndBlocksToDB(newAssistantMessage, [])
+                
+                // 更新topic中的消息列表，移除旧的assistant消息
+                const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
+                await db.topics.update(topicId, { messages: finalMessagesToSave })
+              } catch (error) {
+                console.error('[重试流程] 数据库更新失败:', error)
+              }
+            })()
+            
+            // 使用队列处理新的助手消息
+            const queue = getTopicQueue(topicId)
+            queue.add(async () => {
+              // 重新获取当前的重试次数，确保一致性
+              const currentRetryCount = getRetryCount(topicId, userMessageToRetry.id)
+              await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, newAssistantMessage, originalUserContent, currentRetryCount)
+            })
+          }
+        }
       }, 1500)
     } else {
       // 超过最大重试次数或其他错误，抛出
@@ -1213,6 +1259,10 @@ export const sendMessage =
       if (userMessageBlocks.length > 0) {
         dispatch(upsertManyBlocks(userMessageBlocks))
       }
+
+      // 重置新用户问题的重试计数器
+      resetRetryCount(topicId, userMessage.id)
+      console.log(`[重试计数器] 发送新消息，重置重试计数器 (${topicId}:${userMessage.id})`)
 
       const mentionedModels = userMessage.mentions
       const queue = getTopicQueue(topicId)
