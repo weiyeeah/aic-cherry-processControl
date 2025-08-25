@@ -647,7 +647,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
         // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
-        const textThreshold = 85
+        const textThreshold = 120
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
           console.log(`[强制流程控制] 检测状态详情:`, {
@@ -658,7 +658,7 @@ const fetchAndProcessAssistantResponseImpl = async (
             textThreshold,
             currentRetryCount,
             assistantName: assistant.name,
-            text: text.substring(0, 85) + '...'
+            text: text.substring(0, 120) + '...'
           })
           
           // 智慧办公助手所有查询都强制调用工具，未达到最大重试次数时抛出重试错误
@@ -753,11 +753,16 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onTextComplete: async (finalText) => {
-        // 使用自动重试机制，无需在这里添加警告
+        // 智慧办公助手检查是否调用了MCP工具
+        let finalTextWithWarning = finalText
+        if (isOfficeAssistant && !hasMCPToolCall && forcedToolCallRequired) {
+          console.warn('[强制流程控制] 智慧办公助手完成回复但未调用MCP工具，添加警告')
+          finalTextWithWarning = finalText + '\n\n⚠️ **警告！没有调用工具查询实时数据，数据可能不准确，若想得到具体真实的数据，请重新输入**'
+        }
         
         if (mainTextBlockId) {
           const changes = {
-            content: finalText,
+            content: finalTextWithWarning,
             status: MessageBlockStatus.SUCCESS
           }
           cancelThrottledBlockUpdate(mainTextBlockId)
