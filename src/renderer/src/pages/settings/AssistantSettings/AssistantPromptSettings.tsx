@@ -39,24 +39,28 @@ const AssistantPromptSettings: React.FC<Props> = ({ assistant, updateAssistant }
   }, [prompt])
 
   const onUpdate = () => {
-    const _assistant = { 
-      ...assistant, 
-      name: assistant.id === 'default' ? '智慧办公助手' : name.trim(), 
-      emoji, 
-      prompt 
-    }
+    // 如果是默认助手（智慧办公助手），不允许修改名称
+    const _assistant = assistant.id === 'default' 
+      ? { ...assistant, emoji, prompt }
+      : { ...assistant, name: name.trim(), emoji, prompt }
     updateAssistant(_assistant)
   }
 
   const handleEmojiSelect = (selectedEmoji: string) => {
     setEmoji(selectedEmoji)
-    const _assistant = { ...assistant, name: name.trim(), emoji: selectedEmoji, prompt }
+    // 如果是默认助手（智慧办公助手），不允许修改名称
+    const _assistant = assistant.id === 'default'
+      ? { ...assistant, emoji: selectedEmoji, prompt }
+      : { ...assistant, name: name.trim(), emoji: selectedEmoji, prompt }
     updateAssistant(_assistant)
   }
 
   const handleEmojiDelete = () => {
     setEmoji('')
-    const _assistant = { ...assistant, name: name.trim(), prompt, emoji: '' }
+    // 如果是默认助手（智慧办公助手），不允许修改名称
+    const _assistant = assistant.id === 'default'
+      ? { ...assistant, prompt, emoji: '' }
+      : { ...assistant, name: name.trim(), prompt, emoji: '' }
     updateAssistant(_assistant)
   }
 
@@ -96,9 +100,8 @@ const AssistantPromptSettings: React.FC<Props> = ({ assistant, updateAssistant }
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={onUpdate}
-          style={{ flex: 1 }}
           disabled={assistant.id === 'default'}
-          title={assistant.id === 'default' ? '默认助手名称不可修改' : undefined}
+          style={{ flex: 1 }}
         />
       </HStack>
       <SettingDivider />

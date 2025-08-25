@@ -80,10 +80,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get install -y rpm
-          # 重新设置版本以确保正确性
-          TAG="${{ steps.get-tag.outputs.tag }}"
-          VERSION="${TAG#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
           yarn build:npm linux
           yarn build:linux
 
@@ -98,14 +94,6 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           sudo -H pip install setuptools
-          # 重新设置版本以确保正确性
-          TAG="${{ steps.get-tag.outputs.tag }}"
-          VERSION="${TAG#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          # 重建原生模块以确保架构兼容性
-          rm -rf node_modules
-          yarn install
-          npx electron-rebuild
           yarn build:npm mac
           yarn build:mac
         env:
@@ -115,18 +103,24 @@ jobs:
           MAIN_VITE_MINERU_API_KEY: ${{ vars.MAIN_VITE_MINERU_API_KEY }}
           RENDERER_VITE_AIHUBMIX_SECRET: ${{ vars.RENDERER_VITE_AIHUBMIX_SECRET }}
           RENDERER_VITE_PPIO_APP_SECRET: ${{ vars.RENDERER_VITE_PPIO_APP_SECRET }}
-          # 确保为所有架构构建原生模块
-          npm_config_target_arch: x64
-          npm_config_target_platform: darwin
-          npm_config_arch: x64
+
+      - name: Build Mac x86 (Intel)
+        if: matrix.os == 'macos-latest'
+        run: |
+          sudo -H pip install setuptools
+          yarn build:npm mac
+          yarn build:mac:x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_OPTIONS: --max-old-space-size=8192
+          MAIN_VITE_MINERU_API_KEY: ${{ vars.MAIN_VITE_MINERU_API_KEY }}
+          RENDERER_VITE_AIHUBMIX_SECRET: ${{ vars.RENDERER_VITE_AIHUBMIX_SECRET }}
+          RENDERER_VITE_PPIO_APP_SECRET: ${{ vars.RENDERER_VITE_PPIO_APP_SECRET }}
 
       - name: Build Windows
         if: matrix.os == 'windows-latest'
         run: |
-          # 重新设置版本以确保正确性
-          $TAG = "${{ steps.get-tag.outputs.tag }}"
-          $VERSION = $TAG -replace '^v', ''
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
           yarn build:npm windows
           yarn build:win
         env:
