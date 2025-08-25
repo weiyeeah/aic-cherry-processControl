@@ -45,6 +45,58 @@ import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
 
+/**
+ * 全局重试计数器管理 - 按照对话标识(topicId:askId)隔离重试次数
+ * 确保每个用户问题在每个对话中独立计数，最多重试5次
+ */
+const conversationRetryCounters = new LRUCache<string, number>({
+  max: 1000,
+  ttl: 1000 * 60 * 30, // 30分钟过期
+  updateAgeOnGet: true
+})
+
+/**
+ * 生成对话级别的重试计数器键
+ */
+const getConversationKey = (topicId: string, askId: string): string => {
+  return `${topicId}:${askId}`
+}
+
+/**
+ * 获取指定对话的重试次数
+ */
+const getRetryCount = (topicId: string, askId: string): number => {
+  const key = getConversationKey(topicId, askId)
+  return conversationRetryCounters.get(key) || 0
+}
+
+/**
+ * 增加指定对话的重试次数
+ */
+const incrementRetryCount = (topicId: string, askId: string): number => {
+  const key = getConversationKey(topicId, askId)
+  const currentCount = getRetryCount(topicId, askId)
+  const newCount = currentCount + 1
+  conversationRetryCounters.set(key, newCount)
+  return newCount
+}
+
+/**
+ * 重置指定对话的重试次数
+ */
+const resetRetryCount = (topicId: string, askId: string): void => {
+  const key = getConversationKey(topicId, askId)
+  conversationRetryCounters.delete(key)
+}
+
+/**
+ * 清理指定对话的重试次数（当检测到真正的MCP调用时）
+ */
+const clearRetryCount = (topicId: string, askId: string): void => {
+  resetRetryCount(topicId, askId)
+  console.log(`[重试计数器] 检测到MCP工具调用，清理重试计数器 (${topicId}:${askId})`)
+}
+
 // const handleChangeLoadingOfTopic = async (topicId: string) => {
 //   await waitForTopicQueue(topicId)
 //   store.dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
@@ -332,15 +384,24 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   topicId: string,
   assistant: Assistant,
   assistantMessage: Message,
-  originalUserContent?: string,
-  retryCount: number = 0
+  originalUserContent?: string
 ): Promise<void> => {
+  const askId = assistantMessage.askId
+  if (!askId) {
+    console.error('[强制流程控制] assistantMessage缺少askId，无法进行重试管理')
+    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
+    return
+  }
+
+  const currentRetryCount = getRetryCount(topicId, askId)
+  
   try {
-    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount)
+    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, currentRetryCount)
   } catch (error: any) {
     // 如果是需要重试的错误，进行重试
-    if (error.shouldRetry && retryCount < 10) {
-      console.log(`[强制流程控制] 准备重试，当前重试次数: ${retryCount + 1}/10`)
+    if (error.shouldRetry && currentRetryCount < 5) {
+      const newRetryCount = incrementRetryCount(topicId, askId)
+      console.log(`[强制流程控制] 准备重试，当前重试次数: ${newRetryCount}/5 (对话: ${topicId}:${askId})`)
       
       // 1. 清理assistant消息的内容，准备重新生成
       const state = getState()
@@ -398,10 +459,10 @@ const fetchAndProcessAssistantResponseWithRetry = async (
               '强制要求：立即调用工具获取数据！'
             ]
             
-            const instructionIndex = Math.min(retryCount, toolInstructions.length - 1)
+            const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
             const modifiedContent = `${toolInstructions[instructionIndex]}${baseContent}`
             
-            console.log(`[强制流程控制] 重试第${retryCount + 1}次，使用指令: "${toolInstructions[instructionIndex]}"`)
+            console.log(`[强制流程控制] 重试第${newRetryCount}次，使用指令: "${toolInstructions[instructionIndex]}"`)
             console.log(`[强制流程控制] 完整内容: "${modifiedContent.substring(0, 100)}..."`)
             
             // 更新用户消息内容
@@ -417,8 +478,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
       
       // 3. 延迟后重新开始完整的API调用流程
       setTimeout(() => {
-        console.log(`[强制流程控制] 开始第${retryCount + 1}次重试，重新调用API`)
-        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount + 1)
+        console.log(`[强制流程控制] 开始第${newRetryCount}次重试，重新调用API`)
+        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent)
       }, 1500)
     } else {
       // 超过最大重试次数或其他错误，抛出
@@ -586,7 +647,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
         // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
-        const textThreshold = 50
+        const textThreshold = 85
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
           console.log(`[强制流程控制] 检测状态详情:`, {
@@ -597,11 +658,11 @@ const fetchAndProcessAssistantResponseImpl = async (
             textThreshold,
             currentRetryCount,
             assistantName: assistant.name,
-            text: text.substring(0, 50) + '...'
+            text: text.substring(0, 85) + '...'
           })
           
           // 智慧办公助手所有查询都强制调用工具，未达到最大重试次数时抛出重试错误
-          if (currentRetryCount < 10) {
+          if (currentRetryCount < 5) {
             // 显示"请稍等"提示
             const waitingText = '⏳ **请稍等**\n\n正在自动重新尝试调用工具获取实时数据...'
             
@@ -632,9 +693,9 @@ const fetchAndProcessAssistantResponseImpl = async (
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
             throw retryError
-          } else if (currentRetryCount >= 10) {
+          } else if (currentRetryCount >= 5) {
             // 达到最大重试次数，显示最终错误
-            const errorText = '❌ **无法获取实时数据**\n\n经过多次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
+            const errorText = '❌ **无法获取实时数据**\n\n经过5次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
             
             if (mainTextBlockId) {
               const changes = {
@@ -769,14 +830,16 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 标记已调用工具，解除强制流程控制
         hasToolCall = true
         
-        // 检测是否是真正的MCP工具调用（更宽松的检测条件）
-        if (toolResponse.tool && toolResponse.tool.name) {
+        // 检测是否是真正的MCP工具调用（检测invoking状态）
+        if (toolResponse.tool && toolResponse.tool.name && toolResponse.status === 'invoking') {
           hasMCPToolCall = true
           if (isOfficeAssistant) {
-            console.log('[强制流程控制] 智慧办公助手检测到MCP工具调用:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
+            console.log('[强制流程控制] 智慧办公助手检测到MCP工具调用开始:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
+            // 清理重试计数器
+            clearRetryCount(topicId, assistantMessage.askId || '')
           }
         } else if (isOfficeAssistant) {
-          console.log('[强制流程控制] 检测到工具调用但缺少工具信息:', {
+          console.log('[强制流程控制] 检测到工具调用进展但状态不符合:', {
             hasTool: !!toolResponse.tool,
             toolName: toolResponse.tool?.name,
             status: toolResponse.status,
@@ -814,18 +877,20 @@ const fetchAndProcessAssistantResponseImpl = async (
         // 确保已调用工具的标记
         hasToolCall = true
         
-        // MCP工具调用完成检测（检测任何有工具信息的调用）
-        if (toolResponse.tool && toolResponse.tool.name) {
+        // MCP工具调用完成检测（检测done状态）
+        if (toolResponse.tool && toolResponse.tool.name && (toolResponse.status === 'done' || toolResponse.status === 'error')) {
           hasMCPToolCall = true
           if (isOfficeAssistant) {
             console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
+            // 确保重试计数器已清理
+            clearRetryCount(topicId, assistantMessage.askId || '')
             // 如果有响应内容，也记录一下
             if (toolResponse.response) {
               console.log('[强制流程控制] MCP工具响应内容长度:', typeof toolResponse.response === 'string' ? toolResponse.response.length : 'non-string')
             }
           }
         } else if (isOfficeAssistant) {
-          console.log('[强制流程控制] 工具调用完成但缺少工具信息:', {
+          console.log('[强制流程控制] 工具调用完成但状态不符合:', {
             hasTool: !!toolResponse.tool,
             toolName: toolResponse.tool?.name,
             status: toolResponse.status,
@@ -1202,7 +1267,7 @@ export const sendMessage =
               }
             }
             
-            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
+            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent)
           } else {
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
           }
@@ -1387,6 +1452,10 @@ export const resendMessageThunk =
         console.warn(`Failed to clear keyv cache for message ${userMessageToResend.id}:`, error)
       }
 
+      // 重置重试计数器
+      resetRetryCount(topicId, userMessageToResend.id)
+      console.log(`[重试计数器] 重新发送消息，重置重试计数器 (${topicId}:${userMessageToResend.id})`)
+
       const resetDataList: Message[] = []
 
       if (assistantMessagesToReset.length === 0) {
@@ -1493,6 +1562,10 @@ export const regenerateAssistantResponseThunk =
         )
         return
       }
+
+      // 重置重试计数器
+      resetRetryCount(topicId, assistantMessageToRegenerate.askId || '')
+      console.log(`[重试计数器] 重新生成助手响应，重置重试计数器 (${topicId}:${assistantMessageToRegenerate.askId})`)
 
       // 3. Verify the assistant message itself exists in entities
       const messageToResetEntity = state.messages.entities[assistantMessageToRegenerate.id]
