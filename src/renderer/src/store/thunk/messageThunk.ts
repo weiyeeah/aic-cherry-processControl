@@ -1280,7 +1280,7 @@ export const sendMessage =
         queue.add(async () => {
           // 对智慧办公助手使用重试包装器
           if (assistant.name === '智慧办公助手') {
-            // 智慧办公助手：保存原始用户内容，并在第一次请求就加上调用工具指令
+            // 智慧办公助手：第一次发送时不添加工具指令，只在重试时添加
             const state = getState()
             const userMessageId = assistantMessage.askId
             let originalUserContent: string | undefined = undefined
@@ -1293,10 +1293,8 @@ export const sendMessage =
                 const firstBlock = messageBlocks[firstBlockId]
                 
                 if (firstBlock && 'content' in firstBlock) {
-                  // 确保内容是字符串类型
+                  // 保存原始用户内容（清理工具指令，以防万一）
                   const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
-                  
-                  // 保存原始用户内容（清理工具指令）
                   originalUserContent = currentContent
                     .replace(/^请调用工具。/, '')
                     .replace(/^请务必调用工具获取实时数据。/, '')
@@ -1304,13 +1302,6 @@ export const sendMessage =
                     .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
                     .replace(/^强制要求：立即调用工具获取数据！/, '')
                     .trim()
-                  
-                  // 检查是否已经包含工具调用指令，避免重复添加
-                  if (!currentContent.startsWith('请调用工具')) {
-                    const modifiedContent = `请调用工具。${originalUserContent}`
-                    dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
-                    console.log('[强制流程控制] 已在用户查询前添加工具调用指令')
-                  }
                 }
               }
             }
