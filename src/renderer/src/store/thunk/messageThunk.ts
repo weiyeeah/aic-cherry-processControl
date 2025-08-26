@@ -778,7 +778,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
         // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
-        const textThreshold = 180
+        const textThreshold = 120
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
           console.log(`[强制流程控制] 检测状态详情:`, {
@@ -789,7 +789,7 @@ const fetchAndProcessAssistantResponseImpl = async (
             textThreshold,
             currentRetryCount,
             assistantName: assistant.name,
-            text: text.substring(0, 180) + '...'
+            text: text.substring(0, 120) + '...'
           })
           
           // 智慧办公助手所有查询都强制调用工具，未达到最大重试次数时抛出重试错误
