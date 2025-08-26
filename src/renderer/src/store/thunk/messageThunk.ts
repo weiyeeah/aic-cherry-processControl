@@ -410,6 +410,39 @@ const fetchAndProcessAssistantResponseWithRetry = async (
       const newRetryCount = incrementRetryCount(topicId, askId)
       console.log(`[强制流程控制] 准备重试，当前重试次数: ${newRetryCount}/5 (对话: ${topicId}:${askId})`)
       
+      // 如果错误还没有向用户显示，则显示重试状态
+      if (!error.displayedToUser) {
+        const state = getState()
+        const assistantMessageBlocks = assistantMessage.blocks
+        
+        // 显示重试状态给用户
+        const toolInstructions = [
+          '🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。',
+          '⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！',
+          '🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！',
+          '❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！',
+          '🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！'
+        ]
+        const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
+        const currentInstruction = toolInstructions[instructionIndex]
+        
+        const retryText = `🔄 **正在重试第${newRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令并重新发送请求...\n\n当前使用指令：${currentInstruction}\n\n请稍候...`
+        
+        if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
+          const firstBlockId = assistantMessageBlocks[0]
+          const firstBlock = state.messageBlocks.entities[firstBlockId]
+          if (firstBlock && 'content' in firstBlock) {
+            dispatch(updateOneBlock({ 
+              id: firstBlockId, 
+              changes: { 
+                content: retryText,
+                status: MessageBlockStatus.PROCESSING 
+              } 
+            }))
+          }
+        }
+      }
+      
       // 1. 清理assistant消息的内容，准备重新生成
       const state = getState()
       const assistantMessageBlocks = assistantMessage.blocks
@@ -434,9 +467,9 @@ const fetchAndProcessAssistantResponseWithRetry = async (
       }
       
       // 2. 修改用户消息，添加更强的工具调用指令
-      const userMessageId = assistantMessage.askId
-      if (userMessageId) {
-        const userMessage = state.messages.entities[userMessageId]
+      const userMsgId = assistantMessage.askId
+      if (userMsgId) {
+        const userMessage = state.messages.entities[userMsgId]
         if (userMessage && userMessage.blocks.length > 0) {
           const messageBlocks = state.messageBlocks.entities
           const firstBlockId = userMessage.blocks[0]
@@ -483,57 +516,55 @@ const fetchAndProcessAssistantResponseWithRetry = async (
         }
       }
       
-      // 3. 延迟后使用"点击发送"的逻辑重新发送整个消息
-      setTimeout(() => {
-        console.log(`[强制流程控制] 开始第${newRetryCount}次重试，使用重新发送逻辑`)
+      // 3. 使用"点击发送"的逻辑重新发送整个消息
+      console.log(`[强制流程控制] 开始第${newRetryCount}次重试，使用重新发送逻辑`)
+      
+      // 使用重新发送的逻辑，这样会重新创建助手消息并重新处理整个流程
+      const userMessageId = assistantMessage.askId
+      if (userMessageId) {
+        const currentState = getState()
+        const userMessageToRetry = currentState.messages.entities[userMessageId]
         
-        // 使用重新发送的逻辑，这样会重新创建助手消息并重新处理整个流程
-        const userMessageId = assistantMessage.askId
-        if (userMessageId) {
-          const currentState = getState()
-          const userMessageToRetry = currentState.messages.entities[userMessageId]
-          
-          if (userMessageToRetry) {
-            // 删除当前的assistant消息和其blocks
-            const assistantMessageBlocks = assistantMessage.blocks || []
-            if (assistantMessageBlocks.length > 0) {
-              cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
-            }
-            dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
-            
-            // 创建新的assistant消息
-            const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
-              askId: userMessageToRetry.id,
-              model: assistant.model
-            })
-            
-            // 添加新的assistant消息到store和数据库
-            dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
-            
-            // 异步更新数据库
-            ;(async () => {
-              try {
-                // 先保存新的assistant消息
-                await saveMessageAndBlocksToDB(newAssistantMessage, [])
-                
-                // 更新topic中的消息列表，移除旧的assistant消息
-                const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-                await db.topics.update(topicId, { messages: finalMessagesToSave })
-              } catch (error) {
-                console.error('[重试流程] 数据库更新失败:', error)
-              }
-            })()
-            
-            // 使用队列处理新的助手消息
-            const queue = getTopicQueue(topicId)
-            queue.add(async () => {
-              // 重新获取当前的重试次数，确保一致性
-              const currentRetryCount = getRetryCount(topicId, userMessageToRetry.id)
-              await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, newAssistantMessage, originalUserContent, currentRetryCount)
-            })
+        if (userMessageToRetry) {
+          // 删除当前的assistant消息和其blocks
+          const assistantMessageBlocks = assistantMessage.blocks || []
+          if (assistantMessageBlocks.length > 0) {
+            cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
           }
+          dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
+          
+          // 创建新的assistant消息
+          const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
+            askId: userMessageToRetry.id,
+            model: assistant.model
+          })
+          
+          // 添加新的assistant消息到store和数据库
+          dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
+          
+          // 异步更新数据库
+          setTimeout(async () => {
+            try {
+              // 先保存新的assistant消息
+              await saveMessageAndBlocksToDB(newAssistantMessage, [])
+              
+              // 更新topic中的消息列表，移除旧的assistant消息
+              const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
+              await db.topics.update(topicId, { messages: finalMessagesToSave })
+            } catch (error) {
+              console.error('[重试流程] 数据库更新失败:', error)
+            }
+          }, 100)
+          
+          // 使用队列处理新的助手消息
+          const queue = getTopicQueue(topicId)
+          queue.add(async () => {
+            // 重新获取当前的重试次数，确保一致性
+            const currentRetryCount = getRetryCount(topicId, userMessageToRetry.id)
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, newAssistantMessage, originalUserContent, currentRetryCount)
+          })
         }
-      }, 1500)
+      }
     } else {
       // 超过最大重试次数或其他错误，抛出
       throw error
@@ -736,36 +767,50 @@ const fetchAndProcessAssistantResponseImpl = async (
           // 只有完全验证的MCP工具调用才允许继续输出
           if (!hasValidMCPCall) {
             if (currentRetryCount < 5) {
-              // 显示"请稍等"提示
-              const waitingText = `⏳ **检测到未调用工具，正在重试第${currentRetryCount + 1}次**\n\n正在添加工具调用指令并重新发送...`
+              // 显示重试状态给用户
+              const nextRetryCount = currentRetryCount + 1
+              const toolInstructions = [
+                '🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。',
+                '⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！',
+                '🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！',
+                '❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！',
+                '🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！'
+              ]
+              const instructionIndex = Math.min(nextRetryCount - 1, toolInstructions.length - 1)
+              const currentInstruction = toolInstructions[instructionIndex]
+              
+              const retryText = `🔄 **正在重试第${nextRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令并重新发送请求...\n\n将使用指令：${currentInstruction}\n\n请稍候...`
             
-            if (mainTextBlockId) {
-              const changes = {
-                content: waitingText,
-                status: MessageBlockStatus.PROCESSING
+              if (mainTextBlockId) {
+                const changes = {
+                  content: retryText,
+                  status: MessageBlockStatus.PROCESSING
+                }
+                dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+                saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+              } else if (initialPlaceholderBlockId) {
+                const changes = {
+                  type: MessageBlockType.MAIN_TEXT,
+                  content: retryText,
+                  status: MessageBlockStatus.PROCESSING
+                }
+                dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
+                saveUpdatedBlockToDB(initialPlaceholderBlockId, assistantMsgId, topicId, getState)
               }
-              dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
-            } else if (initialPlaceholderBlockId) {
-              const changes = {
-                type: MessageBlockType.MAIN_TEXT,
-                content: waitingText,
-                status: MessageBlockStatus.PROCESSING
+              
+              // 中断当前流处理
+              try {
+                abortCompletion(assistantMsgId)
+              } catch (error) {
+                console.warn('[强制流程控制] AbortController中断失败:', error)
               }
-              dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
-            }
-            
-            // 中断当前流处理
-            try {
-              abortCompletion(assistantMsgId)
-            } catch (error) {
-              console.warn('[强制流程控制] AbortController中断失败:', error)
-            }
-            
-            // 抛出重试错误
-            const retryError: any = new Error('未检测到MCP工具调用，需要重试')
-            retryError.shouldRetry = true
-            retryError.originalQuery = originalUserQuery
-            throw retryError
+              
+              // 抛出重试错误
+              const retryError: any = new Error('未检测到MCP工具调用，需要重试')
+              retryError.shouldRetry = true
+              retryError.originalQuery = originalUserQuery
+              retryError.displayedToUser = true // 标记已向用户显示
+              throw retryError
           } else if (currentRetryCount >= 5) {
             // 达到最大重试次数，抛出明确的异常
             console.error(`[强制流程控制] 经过${currentRetryCount}次重试，仍未检测到MCP工具调用`)
