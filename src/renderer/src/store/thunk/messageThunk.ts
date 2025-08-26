@@ -569,7 +569,9 @@ const fetchAndProcessAssistantResponseWithRetry = async (
           // 使用队列处理新的助手消息 - 重新调用重试包装器
           const queue = getTopicQueue(topicId)
           console.log(`[强制流程控制] 添加重试任务到队列，助手消息ID: ${newAssistantMessage.id}`)
-          queue.add(async () => {
+          
+          // 等待队列任务完成，这样重试包装器不会提前返回
+          await queue.add(async () => {
             console.log(`[强制流程控制] 开始执行重试任务`)
             try {
               // 重新调用重试包装器，这样如果再次失败还能继续重试
