@@ -843,7 +843,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           mainTextBlockId = newBlock.id // 立即设置ID，防止竞态条件
           await handleBlockTransition(newBlock, MessageBlockType.MAIN_TEXT)
         }
-      },
+      }},
       onTextComplete: async (finalText) => {
         if (mainTextBlockId) {
           const changes = {
