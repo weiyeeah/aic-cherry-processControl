@@ -394,10 +394,20 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   }
 
   const currentRetryCount = getRetryCount(topicId, askId)
+  console.log(`[重试包装器] 开始处理助手响应 (askId: ${askId}, 当前重试次数: ${currentRetryCount})`)
   
   try {
     await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, currentRetryCount)
   } catch (error: any) {
+    console.log(`[重试包装器] 捕获到错误:`, {
+      message: error.message,
+      shouldRetry: error.shouldRetry,
+      isMCPError: error.isMCPError,
+      maxRetriesReached: error.maxRetriesReached,
+      displayedToUser: error.displayedToUser,
+      currentRetryCount
+    })
+    
     // 处理MCP工具调用相关的错误
     if (error.isMCPError && error.maxRetriesReached) {
       // 已达到最大重试次数的MCP错误，直接抛出
@@ -556,12 +566,20 @@ const fetchAndProcessAssistantResponseWithRetry = async (
             }
           }, 100)
           
-          // 使用队列处理新的助手消息
+          // 使用队列处理新的助手消息 - 重新调用重试包装器
           const queue = getTopicQueue(topicId)
+          console.log(`[强制流程控制] 添加重试任务到队列，助手消息ID: ${newAssistantMessage.id}`)
           queue.add(async () => {
-            // 重新获取当前的重试次数，确保一致性
-            const currentRetryCount = getRetryCount(topicId, userMessageToRetry.id)
-            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, newAssistantMessage, originalUserContent, currentRetryCount)
+            console.log(`[强制流程控制] 开始执行重试任务`)
+            try {
+              // 重新调用重试包装器，这样如果再次失败还能继续重试
+              await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, newAssistantMessage, originalUserContent)
+              console.log(`[强制流程控制] 重试任务执行完成`)
+            } catch (retryError) {
+              console.error(`[强制流程控制] 重试任务最终失败:`, retryError)
+              // 这里可以考虑显示最终错误给用户
+              throw retryError
+            }
           })
         }
       }
@@ -599,6 +617,8 @@ const fetchAndProcessAssistantResponseImpl = async (
   hasMCPToolCall = false
   mcpToolCallVerified = false
   realMCPResponse = false
+  
+  console.log(`[强制流程控制] 开始助手响应处理 (助手消息ID: ${assistantMsgId}, 重试次数: ${currentRetryCount}, 是否智慧办公助手: ${isOfficeAssistant})`)
   
   if (currentRetryCount > 0) {
     console.log(`[强制流程控制] 这是第${currentRetryCount}次重试，重置检测状态`)
