@@ -403,7 +403,7 @@ const fetchAndProcessAssistantResponseImpl = async (
   let isOfficeAssistant = assistant.name === '智慧办公助手'
   let textLength = 0
   let forcedToolCallRequired = false
-  let originalUserQuery = '' // 原始用户问题
+
   
   // 每次处理时重置检测状态
   textLength = 0
@@ -445,8 +445,8 @@ const fetchAndProcessAssistantResponseImpl = async (
           })
           .join(' ')
         
-        // 保存原始用户查询（用于重试）
-        originalUserQuery = userQuery
+        // 用户查询内容记录（用于调试）
+        console.log('[统一处理函数] 用户查询内容:', userQuery.substring(0, 100))
         
         // 智慧办公助手强制要求所有询问都调用MCP工具
         forcedToolCallRequired = true
