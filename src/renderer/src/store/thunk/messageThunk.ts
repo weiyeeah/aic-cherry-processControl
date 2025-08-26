@@ -405,8 +405,14 @@ const fetchAndProcessAssistantResponseWithRetry = async (
       isMCPError: error.isMCPError,
       maxRetriesReached: error.maxRetriesReached,
       displayedToUser: error.displayedToUser,
-      currentRetryCount
+      currentRetryCount,
+      askId,
+      topicId
     })
+    
+    // 重新获取最新的重试次数
+    const latestRetryCount = getRetryCount(topicId, askId)
+    console.log(`[重试包装器] 最新重试次数: ${latestRetryCount}, 原始重试次数: ${currentRetryCount}`)
     
     // 处理MCP工具调用相关的错误
     if (error.isMCPError && error.maxRetriesReached) {
@@ -416,7 +422,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
     }
     
     // 如果是需要重试的错误，进行重试
-    if (error.shouldRetry && currentRetryCount < 5) {
+    // 使用最新的重试次数，而不是函数开始时的缓存值
+    if (error.shouldRetry && latestRetryCount < 5) {
       const newRetryCount = incrementRetryCount(topicId, askId)
       console.log(`[强制流程控制] 准备重试，当前重试次数: ${newRetryCount}/5 (对话: ${topicId}:${askId})`)
       
@@ -436,7 +443,7 @@ const fetchAndProcessAssistantResponseWithRetry = async (
         const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
         const currentInstruction = toolInstructions[instructionIndex]
         
-        const retryText = `🔄 **正在重试第${newRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令并重新发送请求...\n\n当前使用指令：${currentInstruction}\n\n请稍候...`
+        const retryText = `🔄 **正在重试第${newRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令(Retry)并重新发送请求...\n\n当前使用指令：${currentInstruction}\n\n请稍候...`
         
         if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
           const firstBlockId = assistantMessageBlocks[0]
@@ -587,6 +594,12 @@ const fetchAndProcessAssistantResponseWithRetry = async (
       }
     } else {
       // 超过最大重试次数或其他错误，抛出
+      console.log(`[重试包装器] 不满足重试条件:`, {
+        shouldRetry: error.shouldRetry,
+        latestRetryCount,
+        maxRetries: 5,
+        willRetry: error.shouldRetry && latestRetryCount < 5
+      })
       throw error
     }
   }
@@ -1712,7 +1725,12 @@ export const resendMessageThunk =
           ...(resetMsg.model ? { model: resetMsg.model } : {})
         }
         queue.add(async () => {
-          await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
+          // 对智慧办公助手使用重试包装器
+          if (assistant.name === '智慧办公助手') {
+            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
+          } else {
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
+          }
         })
       }
     } catch (error) {
@@ -1819,13 +1837,24 @@ export const regenerateAssistantResponseThunk =
         ...(resetAssistantMsg.model ? { model: resetAssistantMsg.model } : {})
       }
       queue.add(async () => {
-        await fetchAndProcessAssistantResponseImpl(
-          dispatch,
-          getState,
-          topicId,
-          assistantConfigForRegen,
-          resetAssistantMsg
-        )
+        // 对智慧办公助手使用重试包装器
+        if (assistant.name === '智慧办公助手') {
+          await fetchAndProcessAssistantResponseWithRetry(
+            dispatch,
+            getState,
+            topicId,
+            assistantConfigForRegen,
+            resetAssistantMsg
+          )
+        } else {
+          await fetchAndProcessAssistantResponseImpl(
+            dispatch,
+            getState,
+            topicId,
+            assistantConfigForRegen,
+            resetAssistantMsg
+          )
+        }
       })
     } catch (error) {
       console.error(
@@ -1990,13 +2019,24 @@ export const appendAssistantResponseThunk =
       }
       const queue = getTopicQueue(topicId)
       queue.add(async () => {
-        await fetchAndProcessAssistantResponseImpl(
-          dispatch,
-          getState,
-          topicId,
-          assistantConfigForThisCall,
-          newAssistantStub // Pass the newly created stub
-        )
+        // 对智慧办公助手使用重试包装器
+        if (assistant.name === '智慧办公助手') {
+          await fetchAndProcessAssistantResponseWithRetry(
+            dispatch,
+            getState,
+            topicId,
+            assistantConfigForThisCall,
+            newAssistantStub // Pass the newly created stub
+          )
+        } else {
+          await fetchAndProcessAssistantResponseImpl(
+            dispatch,
+            getState,
+            topicId,
+            assistantConfigForThisCall,
+            newAssistantStub // Pass the newly created stub
+          )
+        }
       })
     } catch (error) {
       console.error(`[appendAssistantResponseThunk] Error appending assistant response:`, error)
