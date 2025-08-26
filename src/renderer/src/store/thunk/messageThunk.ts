@@ -45,6 +45,14 @@ import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
 
+// MCP重试错误类型定义
+interface MCPRetryError extends Error {
+  isMCPRetryError: boolean
+  retryCount: number
+  currentInstruction: string
+  originalUserContent?: string
+}
+
 /**
  * 全局重试计数器管理 - 按照对话标识(topicId:askId)隔离重试次数
  * 确保每个用户问题在每个对话中独立计数，最多重试5次
@@ -377,7 +385,98 @@ const dispatchMultiModelResponses = async (
 
 // --- End Helper Function ---
 
-
+// 重试处理包装器 - 避免递归调用
+const handleRetryLogic = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  assistant: Assistant,
+  assistantMessage: Message,
+  retryError: MCPRetryError
+) => {
+  console.log(`[重试处理] 开始执行第${retryError.retryCount}次重试`)
+  
+  try {
+    // 1. 修改用户消息，添加更强的工具调用指令
+    const userMessageId = assistantMessage.askId
+    if (userMessageId) {
+      const currentState = getState()
+      const userMessage = currentState.messages.entities[userMessageId]
+      if (userMessage && userMessage.blocks.length > 0) {
+        const messageBlocks = currentState.messageBlocks.entities
+        const firstBlockId = userMessage.blocks[0]
+        const firstBlock = messageBlocks[firstBlockId]
+        
+        if (firstBlock && 'content' in firstBlock) {
+          // 使用原始内容作为基础
+          let baseContent = retryError.originalUserContent
+          if (!baseContent) {
+            const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+            // 清理已有的工具指令前缀，获取原始内容
+            baseContent = currentContent
+              .replace(/^🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。/, '')
+              .replace(/^⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！/, '')
+              .replace(/^🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！/, '')
+              .replace(/^❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！/, '')
+              .replace(/^🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！/, '')
+              .trim()
+          }
+          
+          const modifiedContent = `${retryError.currentInstruction}${baseContent}`
+          console.log(`[重试处理] 重试第${retryError.retryCount}次，使用指令: "${retryError.currentInstruction}"`)
+          
+          // 更新用户消息内容
+          dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
+          
+          // 保存原始内容供后续重试使用
+          if (!retryError.originalUserContent) {
+            retryError.originalUserContent = baseContent
+          }
+        }
+      }
+    }
+    
+    // 2. 创建新的assistant消息
+    const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
+      askId: assistantMessage.askId,
+      model: assistant.model
+    })
+    
+    // 3. 删除当前的assistant消息和其blocks
+    const assistantMessageBlocks = assistantMessage.blocks || []
+    if (assistantMessageBlocks.length > 0) {
+      cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
+    }
+    dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
+    
+    // 4. 添加新的assistant消息到store
+    dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
+    
+    // 5. 保存到数据库
+    await saveMessageAndBlocksToDB(newAssistantMessage, [])
+    const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
+    await db.topics.update(topicId, { messages: finalMessagesToSave })
+    
+    // 6. 使用队列处理新的助手消息（非递归调用）
+    const queue = getTopicQueue(topicId)
+    await queue.add(async () => {
+      console.log(`[重试处理] 开始第${retryError.retryCount}次重试处理`)
+      await fetchAndProcessAssistantResponseImpl(
+        dispatch, 
+        getState, 
+        topicId, 
+        assistant, 
+        newAssistantMessage, 
+        retryError.originalUserContent, 
+        true // 继续启用重试
+      )
+    })
+  } catch (error) {
+    console.error(`[重试处理] 第${retryError.retryCount}次重试失败:`, error)
+    // 如果重试处理失败，设置topic为非加载状态
+    dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+  }
+}
 
 // 统一的助手响应处理函数 - 支持重试逻辑
 const fetchAndProcessAssistantResponseImpl = async (
@@ -577,7 +676,7 @@ const fetchAndProcessAssistantResponseImpl = async (
             text: text.substring(0, 180) + '...'
           })
           
-          // 只有完全验证的MCP工具调用才允许继续输出
+          // 智慧办公助手MCP工具检测和重试处理
           if (!hasValidMCPCall) {
             if (enableRetry && currentRetryCount < 5) {
               // 启用重试逻辑：内部处理重试
@@ -623,133 +722,51 @@ const fetchAndProcessAssistantResponseImpl = async (
                 console.warn('[强制流程控制] AbortController中断失败:', error)
               }
               
-              // 直接处理重试逻辑，而不是抛出错误
-              setTimeout(async () => {
-                try {
-                  console.log(`[统一处理函数] 开始执行第${newRetryCount}次重试`)
-                  
-                  // 1. 修改用户消息，添加更强的工具调用指令
-                  const userMessageId = assistantMessage.askId
-                  if (userMessageId) {
-                    const currentState = getState()
-                    const userMessage = currentState.messages.entities[userMessageId]
-                    if (userMessage && userMessage.blocks.length > 0) {
-                      const messageBlocks = currentState.messageBlocks.entities
-                      const firstBlockId = userMessage.blocks[0]
-                      const firstBlock = messageBlocks[firstBlockId]
-                      
-                      if (firstBlock && 'content' in firstBlock) {
-                        // 使用原始内容作为基础
-                        let baseContent = originalUserContent
-                        if (!baseContent) {
-                          const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
-                          // 清理已有的工具指令前缀，获取原始内容
-                          baseContent = currentContent
-                            .replace(/^🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。/, '')
-                            .replace(/^⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！/, '')
-                            .replace(/^🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！/, '')
-                            .replace(/^❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！/, '')
-                            .replace(/^🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！/, '')
-                            .trim()
-                        }
-                        
-                        const modifiedContent = `${currentInstruction}${baseContent}`
-                        console.log(`[统一处理函数] 重试第${newRetryCount}次，使用指令: "${currentInstruction}"`)
-                        
-                        // 更新用户消息内容
-                        dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
-                        
-                        // 保存原始内容供后续重试使用
-                        if (!originalUserContent) {
-                          originalUserContent = baseContent
-                        }
-                      }
-                    }
-                  }
-                  
-                  // 2. 创建新的assistant消息
-                  const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
-                    askId: assistantMessage.askId,
-                    model: assistant.model
-                  })
-                  
-                  // 3. 删除当前的assistant消息和其blocks
-                  const assistantMessageBlocks = assistantMessage.blocks || []
-                  if (assistantMessageBlocks.length > 0) {
-                    cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
-                  }
-                  dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
-                  
-                  // 4. 添加新的assistant消息到store
-                  dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
-                  
-                  // 5. 保存到数据库
-                  await saveMessageAndBlocksToDB(newAssistantMessage, [])
-                  const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-                  await db.topics.update(topicId, { messages: finalMessagesToSave })
-                  
-                  // 6. 使用队列处理新的助手消息
-                  const queue = getTopicQueue(topicId)
-                  await queue.add(async () => {
-                    console.log(`[统一处理函数] 开始第${newRetryCount}次重试处理`)
-                    await fetchAndProcessAssistantResponseImpl(
-                      dispatch, 
-                      getState, 
-                      topicId, 
-                      assistant, 
-                      newAssistantMessage, 
-                      originalUserContent, 
-                      enableRetry
-                    )
-                  })
-                } catch (retryError) {
-                  console.error(`[统一处理函数] 第${newRetryCount}次重试失败:`, retryError)
-                }
-              }, 100)
+              // 抛出重试错误，由外部处理重试逻辑，避免递归调用
+              const retryError: MCPRetryError = new Error(`需要重试 - 第${newRetryCount}次重试`) as MCPRetryError
+              retryError.name = 'MCPRetryError'
+              retryError.isMCPRetryError = true
+              retryError.retryCount = newRetryCount
+              retryError.currentInstruction = currentInstruction
+              retryError.originalUserContent = originalUserContent
+              throw retryError
+            } else if (enableRetry && currentRetryCount >= 5) {
+              // 达到最大重试次数，显示错误
+              console.error(`[强制流程控制] 经过${currentRetryCount}次重试，仍未检测到MCP工具调用`)
               
-              return // 结束当前流处理
-            } else if (currentRetryCount >= 5) {
-            // 达到最大重试次数，抛出明确的异常
-            console.error(`[强制流程控制] 经过${currentRetryCount}次重试，仍未检测到MCP工具调用`)
-            
-            const finalError: any = new Error('经过5次尝试，系统仍无法调用MCP工具')
-            finalError.shouldRetry = false
-            finalError.isMCPError = true
-            finalError.maxRetriesReached = true
-            finalError.retryCount = currentRetryCount
-            
-            // 显示最终错误信息
-            const errorText = '❌ **没有调用MCP工具**\n\n经过5次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
-            
-            if (mainTextBlockId) {
-              const changes = {
-                content: errorText,
-                status: MessageBlockStatus.ERROR
+              const errorText = '❌ **没有调用MCP工具**\n\n经过5次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
+              
+              if (mainTextBlockId) {
+                const changes = {
+                  content: errorText,
+                  status: MessageBlockStatus.ERROR
+                }
+                dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
+                saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+              } else if (initialPlaceholderBlockId) {
+                const changes = {
+                  type: MessageBlockType.MAIN_TEXT,
+                  content: errorText,
+                  status: MessageBlockStatus.ERROR
+                }
+                dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
+                saveUpdatedBlockToDB(initialPlaceholderBlockId, assistantMsgId, topicId, getState)
               }
-              dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
-              saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
-            } else if (initialPlaceholderBlockId) {
-              const changes = {
-                type: MessageBlockType.MAIN_TEXT,
-                content: errorText,
-                status: MessageBlockStatus.ERROR
-              }
-              dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
-              saveUpdatedBlockToDB(initialPlaceholderBlockId, assistantMsgId, topicId, getState)
+              
+              dispatch(
+                newMessagesActions.updateMessage({
+                  topicId,
+                  messageId: assistantMsgId,
+                  updates: { status: AssistantMessageStatus.ERROR }
+                })
+              )
+              
+              dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+              return // 结束处理
+            } else {
+              // 不启用重试或其他情况，显示警告但继续输出
+              console.warn('[强制流程控制] 未检测到MCP工具调用，但重试未启用，继续输出')
             }
-            
-            dispatch(
-              newMessagesActions.updateMessage({
-                topicId,
-                messageId: assistantMsgId,
-                updates: { status: AssistantMessageStatus.ERROR }
-              })
-            )
-            
-            dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
-            
-            // 抛出异常
-            throw finalError
           } else {
             // 检测到MCP工具调用，允许继续输出
             console.log(`[强制流程控制] 检测到MCP工具调用，允许继续输出`)
@@ -785,7 +802,7 @@ const fetchAndProcessAssistantResponseImpl = async (
           mainTextBlockId = newBlock.id // 立即设置ID，防止竞态条件
           await handleBlockTransition(newBlock, MessageBlockType.MAIN_TEXT)
         }
-      }},
+      },
       onTextComplete: async (finalText) => {
         if (mainTextBlockId) {
           const changes = {
@@ -1260,6 +1277,17 @@ const fetchAndProcessAssistantResponseImpl = async (
     })
   } catch (error: any) {
     console.error('Error fetching chat completion:', error)
+    
+    // 检查是否是MCP重试错误
+    if (error.isMCPRetryError && enableRetry) {
+      console.log(`[统一处理函数] 捕获到MCP重试错误，准备处理重试`)
+      // 使用非递归的重试处理
+      setTimeout(() => {
+        handleRetryLogic(dispatch, getState, topicId, assistant, assistantMessage, error)
+      }, 100)
+      return // 不继续抛出错误
+    }
+    
     if (assistantMessage) {
       callbacks.onError?.(error)
       throw error
