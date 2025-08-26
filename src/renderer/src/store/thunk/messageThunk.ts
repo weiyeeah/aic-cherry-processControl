@@ -97,65 +97,6 @@ const clearRetryCount = (topicId: string, askId: string): void => {
   console.log(`[重试计数器] 检测到MCP工具调用，清理重试计数器 (${topicId}:${askId})`)
 }
 
-/**
- * 智慧办公助手上下文增强：添加数据新鲜度提示和工具使用引导
- * 目的：在不修改阈值的情况下鼓励模型调用工具获取实时数据
- */
-const enhanceContextForToolUsage = (messages: Message[], currentRetryCount: number = 0): Message[] => {
-  const enhancedMessages = [...messages]
-  
-  // 关键策略：直接修改最后一条用户消息，添加工具调用提醒
-  if (enhancedMessages.length > 0) {
-    const lastMessage = enhancedMessages[enhancedMessages.length - 1]
-    if (lastMessage.role === 'user') {
-      // 根据重试次数和上下文长度决定提醒强度
-      let toolReminder = ''
-      
-      if (enhancedMessages.length > 4) {
-        // 长对话：强调历史信息可能过时
-        if (currentRetryCount === 0) {
-          toolReminder = '\n\n💡 提示：建议使用工具获取最新实时数据。'
-        } else if (currentRetryCount === 1) {
-          toolReminder = '\n\n⚠️ 重要：历史信息可能已过时，请优先调用工具获取最新数据。'
-        } else {
-          toolReminder = '\n\n🚨 关键：必须使用工具查询实时信息，历史对话内容不可信！'
-        }
-      } else {
-        // 短对话：轻度提醒
-        if (currentRetryCount >= 1) {
-          toolReminder = '\n\n💼 请使用工具获取最新数据。'
-        }
-      }
-      
-      if (toolReminder) {
-        // 创建增强版的最后一条用户消息
-        const enhancedLastMessage = { ...lastMessage }
-        enhancedMessages[enhancedMessages.length - 1] = enhancedLastMessage
-        console.log(`[上下文增强] 重试第${currentRetryCount}次，为用户消息添加工具提醒: "${toolReminder.trim()}"`)
-      }
-    }
-  }
-  
-  // 策略2: 为历史助手消息添加过时标记（仅在重试时）
-  if (currentRetryCount > 0) {
-    const now = new Date()
-    for (let i = 0; i < enhancedMessages.length - 1; i++) {
-      const message = enhancedMessages[i]
-      if (message.role === 'assistant' && message.createdAt) {
-        const messageTime = new Date(message.createdAt)
-        const hoursAgo = Math.floor((now.getTime() - messageTime.getTime()) / (1000 * 60 * 60))
-        
-        // 为超过30分钟的助手回复添加过时标记
-        if (hoursAgo >= 0.5) {
-          console.log(`[上下文增强] 标记${hoursAgo}小时前的助手消息为可能过时`)
-        }
-      }
-    }
-  }
-  
-  return enhancedMessages
-}
-
 // const handleChangeLoadingOfTopic = async (topicId: string) => {
 //   await waitForTopicQueue(topicId)
 //   store.dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
@@ -457,6 +398,13 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   try {
     await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, currentRetryCount)
   } catch (error: any) {
+    // 处理MCP工具调用相关的错误
+    if (error.isMCPError && error.maxRetriesReached) {
+      // 已达到最大重试次数的MCP错误，直接抛出
+      console.error(`[强制流程控制] MCP工具调用失败，已达到最大重试次数: ${error.retryCount}`)
+      throw error
+    }
+    
     // 如果是需要重试的错误，进行重试
     if (error.shouldRetry && currentRetryCount < 5) {
       const newRetryCount = incrementRetryCount(topicId, askId)
@@ -501,21 +449,21 @@ const fetchAndProcessAssistantResponseWithRetry = async (
               const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
               // 清理已有的工具指令前缀，获取原始内容
               baseContent = currentContent
-                .replace(/^请调用工具。/, '')
-                .replace(/^请务必调用工具获取实时数据。/, '')
-                .replace(/^重要：必须调用MCP工具！/, '')
-                .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
-                .replace(/^强制要求：立即调用工具获取数据！/, '')
+                .replace(/^🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。/, '')
+                .replace(/^⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！/, '')
+                .replace(/^🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！/, '')
+                .replace(/^❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！/, '')
+                .replace(/^🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！/, '')
                 .trim()
             }
             
-            // 根据重试次数使用更强的指令
+            // 根据重试次数使用更强的工具调用指令，强制模型必须调用MCP工具
             const toolInstructions = [
-              '请调用工具。',
-              '请务必调用工具获取实时数据。',
-              '重要：必须调用MCP工具！',
-              '警告：禁止使用记忆，必须调用工具！',
-              '强制要求：立即调用工具获取数据！'
+              '🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。',
+              '⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！',
+              '🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！',
+              '❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！',
+              '🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！'
             ]
             
             const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
@@ -531,14 +479,11 @@ const fetchAndProcessAssistantResponseWithRetry = async (
             if (!originalUserContent) {
               originalUserContent = baseContent
             }
-            
-            // 立即保存用户消息的修改到数据库，确保重试时能读取到最新内容
-            saveUpdatedBlockToDB(firstBlockId, userMessageId, topicId, getState)
           }
         }
       }
       
-      // 3. 短暂延迟后使用"点击发送"的逻辑重新发送整个消息
+      // 3. 延迟后使用"点击发送"的逻辑重新发送整个消息
       setTimeout(() => {
         console.log(`[强制流程控制] 开始第${newRetryCount}次重试，使用重新发送逻辑`)
         
@@ -610,17 +555,24 @@ const fetchAndProcessAssistantResponseImpl = async (
   let callbacks: StreamProcessorCallbacks = {}
   
   // 智慧办公助手强制流程控制变量
-  let hasToolCall = false
-  let hasMCPToolCall = false // 专门检测MCP工具调用
+  let hasMCPToolCall = false          // 检测是否有MCP工具调用（智慧办公助手强制要求）
+  let mcpToolCallVerified = false     // 验证是否真正调用了MCP工具（防止虚假检测）
+  let realMCPResponse = false         // 检测是否有真实的MCP响应内容
   let isOfficeAssistant = assistant.name === '智慧办公助手'
   let textLength = 0
   let forcedToolCallRequired = false
-  // 使用currentRetryCount参数，无需本地变量
   let originalUserQuery = '' // 原始用户问题
   
-  // 如果是重试，重置强制检测状态
+  // 每次处理时重置检测状态
+  textLength = 0
+  hasMCPToolCall = false
+  mcpToolCallVerified = false
+  realMCPResponse = false
+  
   if (currentRetryCount > 0) {
     console.log(`[强制流程控制] 这是第${currentRetryCount}次重试，重置检测状态`)
+  } else {
+    console.log(`[强制流程控制] 开始新的助手响应处理，重置检测状态`)
   }
   
   // 智慧办公助手强制MCP工具调用检查
@@ -665,8 +617,14 @@ const fetchAndProcessAssistantResponseImpl = async (
     // 如果是强制要求调用工具的查询，设置一个延时检查
     if (forcedToolCallRequired) {
       setTimeout(() => {
-        if (!hasToolCall) {
-          console.warn('[强制流程控制] 30秒内未检测到MCP工具调用，可能需要强制中断')
+        const hasValidMCPCall = hasMCPToolCall && mcpToolCallVerified && realMCPResponse
+        if (!hasValidMCPCall) {
+          console.warn('[强制流程控制] 30秒内未检测到有效MCP工具调用，检测状态:', {
+            hasMCPToolCall,
+            mcpToolCallVerified, 
+            realMCPResponse,
+            hasValidMCPCall
+          })
         }
       }, 30000)
     }
@@ -726,15 +684,6 @@ const fetchAndProcessAssistantResponseImpl = async (
     let messagesForContext: Message[] = []
     const userMessageId = assistantMessage.askId
     const userMessageIndex = allMessagesForTopic.findIndex((m) => m?.id === userMessageId)
-    
-    // 调试：检查重试时用户消息内容
-    if (isOfficeAssistant && currentRetryCount > 0 && userMessageId) {
-      const userMsg = allMessagesForTopic.find(m => m.id === userMessageId)
-      if (userMsg) {
-        console.log(`[重试调试] 第${currentRetryCount}次重试，用户消息ID: ${userMessageId}`)
-        console.log(`[重试调试] 用户消息块数量: ${userMsg.blocks?.length || 0}`)
-      }
-    }
 
     if (userMessageIndex === -1) {
       console.error(
@@ -749,20 +698,6 @@ const fetchAndProcessAssistantResponseImpl = async (
     } else {
       const contextSlice = allMessagesForTopic.slice(0, userMessageIndex + 1)
       messagesForContext = contextSlice.filter((m) => m && !m.status?.includes('ing'))
-      
-      // 智慧办公助手上下文增强：添加数据新鲜度提示，鼓励工具调用
-      if (isOfficeAssistant && messagesForContext.length > 2) {
-        messagesForContext = enhanceContextForToolUsage(messagesForContext, currentRetryCount)
-        
-        // 重试时激进策略：大幅减少上下文以强制工具调用
-        if (currentRetryCount >= 2 && messagesForContext.length > 6) {
-          console.log(`[强制工具调用] 重试第${currentRetryCount}次，激进截断上下文`)
-          const userMessage = messagesForContext[messagesForContext.length - 1] // 当前用户消息
-          const recentContext = messagesForContext.slice(-3, -1) // 只保留最近1轮对话
-          messagesForContext = [...recentContext, userMessage]
-          console.log(`[强制工具调用] 上下文从原来的长度大幅缩减到${messagesForContext.length}条，强制模型关注当前问题`)
-        }
-      }
     }
 
     callbacks = {
@@ -776,26 +711,33 @@ const fetchAndProcessAssistantResponseImpl = async (
       onTextChunk: async (text) => {
         textLength += text.length
         
-        // 智慧办公助手强制流程控制：检测未调用工具的文本生成
-        // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
-        const textThreshold = 120
-        if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
-          console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
+        // 智慧办公助手强制流程控制：检测是否调用MCP工具
+        // 达到文本阈值时检查MCP工具调用状态，必须同时满足：
+        // 1. 检测到MCP工具调用开始 (hasMCPToolCall)
+        // 2. 验证工具调用真实性 (mcpToolCallVerified) 
+        // 3. 收到真实响应内容 (realMCPResponse)
+        const textThreshold = 180
+        if (isOfficeAssistant && textLength > textThreshold) {
+          const hasValidMCPCall = hasMCPToolCall && mcpToolCallVerified && realMCPResponse
+          
+          console.warn(`[强制流程控制] 达到文本阈值${textThreshold}字符，检查MCP工具调用状态`)
           console.log(`[强制流程控制] 检测状态详情:`, {
-            hasToolCall,
             hasMCPToolCall,
-            forcedToolCallRequired,
+            mcpToolCallVerified,
+            realMCPResponse,
+            hasValidMCPCall,
             textLength,
             textThreshold,
             currentRetryCount,
             assistantName: assistant.name,
-            text: text.substring(0, 120) + '...'
+            text: text.substring(0, 180) + '...'
           })
           
-          // 智慧办公助手所有查询都强制调用工具，未达到最大重试次数时抛出重试错误
-          if (currentRetryCount < 5) {
-            // 显示"请稍等"提示
-            const waitingText = '⏳ **请稍等**\n\n正在自动重新尝试调用工具获取实时数据...'
+          // 只有完全验证的MCP工具调用才允许继续输出
+          if (!hasValidMCPCall) {
+            if (currentRetryCount < 5) {
+              // 显示"请稍等"提示
+              const waitingText = `⏳ **检测到未调用工具，正在重试第${currentRetryCount + 1}次**\n\n正在添加工具调用指令并重新发送...`
             
             if (mainTextBlockId) {
               const changes = {
@@ -820,13 +762,22 @@ const fetchAndProcessAssistantResponseImpl = async (
             }
             
             // 抛出重试错误
-            const retryError: any = new Error('需要调用MCP工具')
+            const retryError: any = new Error('未检测到MCP工具调用，需要重试')
             retryError.shouldRetry = true
             retryError.originalQuery = originalUserQuery
             throw retryError
           } else if (currentRetryCount >= 5) {
-            // 达到最大重试次数，显示最终错误
-            const errorText = '❌ **无法获取实时数据**\n\n经过5次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
+            // 达到最大重试次数，抛出明确的异常
+            console.error(`[强制流程控制] 经过${currentRetryCount}次重试，仍未检测到MCP工具调用`)
+            
+            const finalError: any = new Error('经过5次尝试，系统仍无法调用MCP工具')
+            finalError.shouldRetry = false
+            finalError.isMCPError = true
+            finalError.maxRetriesReached = true
+            finalError.retryCount = currentRetryCount
+            
+            // 显示最终错误信息
+            const errorText = '❌ **没有调用MCP工具**\n\n经过5次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
             
             if (mainTextBlockId) {
               const changes = {
@@ -835,21 +786,31 @@ const fetchAndProcessAssistantResponseImpl = async (
               }
               dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
               saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
+            } else if (initialPlaceholderBlockId) {
+              const changes = {
+                type: MessageBlockType.MAIN_TEXT,
+                content: errorText,
+                status: MessageBlockStatus.ERROR
+              }
+              dispatch(updateOneBlock({ id: initialPlaceholderBlockId, changes }))
+              saveUpdatedBlockToDB(initialPlaceholderBlockId, assistantMsgId, topicId, getState)
             }
             
             dispatch(
               newMessagesActions.updateMessage({
                 topicId,
                 messageId: assistantMsgId,
-                updates: { status: AssistantMessageStatus.SUCCESS }
+                updates: { status: AssistantMessageStatus.ERROR }
               })
             )
             
             dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
-            return
+            
+            // 抛出异常
+            throw finalError
           } else {
-            // 这种情况理论上不应该发生，因为所有查询都是强制的
-            console.warn('[强制流程控制] 意外情况：未满足重试条件但也未达到最大重试次数')
+            // 检测到MCP工具调用，允许继续输出
+            console.log(`[强制流程控制] 检测到MCP工具调用，允许继续输出`)
           }
         }
         
@@ -956,16 +917,34 @@ const fetchAndProcessAssistantResponseImpl = async (
         thinkingBlockId = null
       },
       onToolCallInProgress: (toolResponse: MCPToolResponse) => {
-        // 标记已调用工具，解除强制流程控制
-        hasToolCall = true
-        
-        // 检测是否是真正的MCP工具调用（检测invoking状态）
+        // 第一层：检测是否是真正的MCP工具调用（检测invoking状态）
         if (toolResponse.tool && toolResponse.tool.name && toolResponse.status === 'invoking') {
           hasMCPToolCall = true
+          
+          // 第二层：验证工具调用的真实性
           if (isOfficeAssistant) {
             console.log('[强制流程控制] 智慧办公助手检测到MCP工具调用开始:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
-            // 清理重试计数器，表示成功调用了工具
-            clearRetryCount(topicId, assistantMessage.askId || '')
+            
+            // 验证工具是否真正存在和可调用
+            const toolExists = toolResponse.tool.serverName && toolResponse.tool.serverId
+            const hasValidArguments = toolResponse.arguments && typeof toolResponse.arguments === 'object'
+            
+            if (toolExists && hasValidArguments) {
+              mcpToolCallVerified = true
+              console.log('[强制流程控制] MCP工具调用验证通过:', {
+                serverName: toolResponse.tool.serverName,
+                serverId: toolResponse.tool.serverId,
+                toolName: toolResponse.tool.name,
+                hasArguments: !!toolResponse.arguments
+              })
+            } else {
+              console.warn('[强制流程控制] MCP工具调用验证失败:', {
+                toolExists,
+                hasValidArguments,
+                serverName: toolResponse.tool.serverName,
+                serverId: toolResponse.tool.serverId
+              })
+            }
           }
         } else if (isOfficeAssistant) {
           console.log('[强制流程控制] 检测到工具调用进展但状态不符合:', {
@@ -1003,19 +982,41 @@ const fetchAndProcessAssistantResponseImpl = async (
         }
       },
       onToolCallComplete: (toolResponse: MCPToolResponse) => {
-        // 确保已调用工具的标记
-        hasToolCall = true
-        
-        // MCP工具调用完成检测（检测done状态）
+        // 第一层：MCP工具调用完成检测（检测done状态）
         if (toolResponse.tool && toolResponse.tool.name && (toolResponse.status === 'done' || toolResponse.status === 'error')) {
           hasMCPToolCall = true
+          
           if (isOfficeAssistant) {
             console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
-            // 确保重试计数器已清理，表示成功调用了工具
-            clearRetryCount(topicId, assistantMessage.askId || '')
-            // 如果有响应内容，也记录一下
+            
+            // 第三层：验证响应内容的真实性
             if (toolResponse.response) {
-              console.log('[强制流程控制] MCP工具响应内容长度:', typeof toolResponse.response === 'string' ? toolResponse.response.length : 'non-string')
+              const responseType = typeof toolResponse.response
+              const hasContent = toolResponse.response.content && Array.isArray(toolResponse.response.content) && toolResponse.response.content.length > 0
+              const isRealResponse = !toolResponse.response.isError && hasContent
+              
+              if (isRealResponse) {
+                realMCPResponse = true
+                console.log('[强制流程控制] MCP工具响应验证通过:', {
+                  contentLength: toolResponse.response.content?.length || 0,
+                  isError: toolResponse.response.isError,
+                  responseType: responseType
+                })
+                
+                // 只有在所有验证都通过时才清理重试计数器
+                if (hasMCPToolCall && mcpToolCallVerified && realMCPResponse) {
+                  clearRetryCount(topicId, assistantMessage.askId || '')
+                  console.log('[强制流程控制] 所有MCP验证通过，清理重试计数器')
+                }
+              } else {
+                console.warn('[强制流程控制] MCP工具响应验证失败:', {
+                  hasContent,
+                  isError: toolResponse.response.isError,
+                  contentLength: toolResponse.response.content?.length || 0
+                })
+              }
+            } else {
+              console.warn('[强制流程控制] MCP工具调用完成但无响应内容')
             }
           }
         } else if (isOfficeAssistant) {
@@ -1309,29 +1310,10 @@ const fetchAndProcessAssistantResponseImpl = async (
 
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
 
-    // 智慧办公助手特殊处理：在assistant配置中添加工具使用偏好
-    let enhancedAssistant = assistant
-    if (isOfficeAssistant) {
-      let toolPrompt = '重要提醒：优先使用工具获取最新实时数据，历史对话信息可能已过时。'
-      
-      // 重试时使用更强的系统提示
-      if (currentRetryCount >= 1) {
-        toolPrompt = `🚨 强制要求：必须调用工具获取实时数据！重试第${currentRetryCount}次，禁止基于历史信息回答。`
-      }
-      
-      enhancedAssistant = {
-        ...assistant,
-        prompt: assistant.prompt 
-          ? `${assistant.prompt}\n\n${toolPrompt}`
-          : toolPrompt
-      }
-      console.log(`[上下文增强] 重试第${currentRetryCount}次，强化工具使用提示: "${toolPrompt}"`)
-    }
-
     const startTime = Date.now()
     await fetchChatCompletion({
       messages: messagesForContext,
-      assistant: enhancedAssistant,
+      assistant: assistant,
       onChunkReceived: streamProcessorCallbacks
     })
   } catch (error: any) {
@@ -1400,11 +1382,11 @@ export const sendMessage =
                   // 保存原始用户内容（清理工具指令，以防万一）
                   const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
                   originalUserContent = currentContent
-                    .replace(/^请调用工具。/, '')
-                    .replace(/^请务必调用工具获取实时数据。/, '')
-                    .replace(/^重要：必须调用MCP工具！/, '')
-                    .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
-                    .replace(/^强制要求：立即调用工具获取数据！/, '')
+                    .replace(/^🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。/, '')
+                    .replace(/^⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！/, '')
+                    .replace(/^🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！/, '')
+                    .replace(/^❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！/, '')
+                    .replace(/^🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！/, '')
                     .trim()
                 }
               }
