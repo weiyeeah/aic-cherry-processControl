@@ -97,6 +97,65 @@ const clearRetryCount = (topicId: string, askId: string): void => {
   console.log(`[重试计数器] 检测到MCP工具调用，清理重试计数器 (${topicId}:${askId})`)
 }
 
+/**
+ * 智慧办公助手上下文增强：添加数据新鲜度提示和工具使用引导
+ * 目的：在不修改阈值的情况下鼓励模型调用工具获取实时数据
+ */
+const enhanceContextForToolUsage = (messages: Message[], currentRetryCount: number = 0): Message[] => {
+  const enhancedMessages = [...messages]
+  
+  // 关键策略：直接修改最后一条用户消息，添加工具调用提醒
+  if (enhancedMessages.length > 0) {
+    const lastMessage = enhancedMessages[enhancedMessages.length - 1]
+    if (lastMessage.role === 'user') {
+      // 根据重试次数和上下文长度决定提醒强度
+      let toolReminder = ''
+      
+      if (enhancedMessages.length > 4) {
+        // 长对话：强调历史信息可能过时
+        if (currentRetryCount === 0) {
+          toolReminder = '\n\n💡 提示：建议使用工具获取最新实时数据。'
+        } else if (currentRetryCount === 1) {
+          toolReminder = '\n\n⚠️ 重要：历史信息可能已过时，请优先调用工具获取最新数据。'
+        } else {
+          toolReminder = '\n\n🚨 关键：必须使用工具查询实时信息，历史对话内容不可信！'
+        }
+      } else {
+        // 短对话：轻度提醒
+        if (currentRetryCount >= 1) {
+          toolReminder = '\n\n💼 请使用工具获取最新数据。'
+        }
+      }
+      
+      if (toolReminder) {
+        // 创建增强版的最后一条用户消息
+        const enhancedLastMessage = { ...lastMessage }
+        enhancedMessages[enhancedMessages.length - 1] = enhancedLastMessage
+        console.log(`[上下文增强] 重试第${currentRetryCount}次，为用户消息添加工具提醒: "${toolReminder.trim()}"`)
+      }
+    }
+  }
+  
+  // 策略2: 为历史助手消息添加过时标记（仅在重试时）
+  if (currentRetryCount > 0) {
+    const now = new Date()
+    for (let i = 0; i < enhancedMessages.length - 1; i++) {
+      const message = enhancedMessages[i]
+      if (message.role === 'assistant' && message.createdAt) {
+        const messageTime = new Date(message.createdAt)
+        const hoursAgo = Math.floor((now.getTime() - messageTime.getTime()) / (1000 * 60 * 60))
+        
+        // 为超过30分钟的助手回复添加过时标记
+        if (hoursAgo >= 0.5) {
+          console.log(`[上下文增强] 标记${hoursAgo}小时前的助手消息为可能过时`)
+        }
+      }
+    }
+  }
+  
+  return enhancedMessages
+}
+
 // const handleChangeLoadingOfTopic = async (topicId: string) => {
 //   await waitForTopicQueue(topicId)
 //   store.dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
@@ -472,11 +531,14 @@ const fetchAndProcessAssistantResponseWithRetry = async (
             if (!originalUserContent) {
               originalUserContent = baseContent
             }
+            
+            // 立即保存用户消息的修改到数据库，确保重试时能读取到最新内容
+            saveUpdatedBlockToDB(firstBlockId, userMessageId, topicId, getState)
           }
         }
       }
       
-      // 3. 延迟后使用"点击发送"的逻辑重新发送整个消息
+      // 3. 短暂延迟后使用"点击发送"的逻辑重新发送整个消息
       setTimeout(() => {
         console.log(`[强制流程控制] 开始第${newRetryCount}次重试，使用重新发送逻辑`)
         
@@ -664,6 +726,15 @@ const fetchAndProcessAssistantResponseImpl = async (
     let messagesForContext: Message[] = []
     const userMessageId = assistantMessage.askId
     const userMessageIndex = allMessagesForTopic.findIndex((m) => m?.id === userMessageId)
+    
+    // 调试：检查重试时用户消息内容
+    if (isOfficeAssistant && currentRetryCount > 0 && userMessageId) {
+      const userMsg = allMessagesForTopic.find(m => m.id === userMessageId)
+      if (userMsg) {
+        console.log(`[重试调试] 第${currentRetryCount}次重试，用户消息ID: ${userMessageId}`)
+        console.log(`[重试调试] 用户消息块数量: ${userMsg.blocks?.length || 0}`)
+      }
+    }
 
     if (userMessageIndex === -1) {
       console.error(
@@ -678,6 +749,20 @@ const fetchAndProcessAssistantResponseImpl = async (
     } else {
       const contextSlice = allMessagesForTopic.slice(0, userMessageIndex + 1)
       messagesForContext = contextSlice.filter((m) => m && !m.status?.includes('ing'))
+      
+      // 智慧办公助手上下文增强：添加数据新鲜度提示，鼓励工具调用
+      if (isOfficeAssistant && messagesForContext.length > 2) {
+        messagesForContext = enhanceContextForToolUsage(messagesForContext, currentRetryCount)
+        
+        // 重试时激进策略：大幅减少上下文以强制工具调用
+        if (currentRetryCount >= 2 && messagesForContext.length > 6) {
+          console.log(`[强制工具调用] 重试第${currentRetryCount}次，激进截断上下文`)
+          const userMessage = messagesForContext[messagesForContext.length - 1] // 当前用户消息
+          const recentContext = messagesForContext.slice(-3, -1) // 只保留最近1轮对话
+          messagesForContext = [...recentContext, userMessage]
+          console.log(`[强制工具调用] 上下文从原来的长度大幅缩减到${messagesForContext.length}条，强制模型关注当前问题`)
+        }
+      }
     }
 
     callbacks = {
@@ -1224,10 +1309,29 @@ const fetchAndProcessAssistantResponseImpl = async (
 
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
 
+    // 智慧办公助手特殊处理：在assistant配置中添加工具使用偏好
+    let enhancedAssistant = assistant
+    if (isOfficeAssistant) {
+      let toolPrompt = '重要提醒：优先使用工具获取最新实时数据，历史对话信息可能已过时。'
+      
+      // 重试时使用更强的系统提示
+      if (currentRetryCount >= 1) {
+        toolPrompt = `🚨 强制要求：必须调用工具获取实时数据！重试第${currentRetryCount}次，禁止基于历史信息回答。`
+      }
+      
+      enhancedAssistant = {
+        ...assistant,
+        prompt: assistant.prompt 
+          ? `${assistant.prompt}\n\n${toolPrompt}`
+          : toolPrompt
+      }
+      console.log(`[上下文增强] 重试第${currentRetryCount}次，强化工具使用提示: "${toolPrompt}"`)
+    }
+
     const startTime = Date.now()
     await fetchChatCompletion({
       messages: messagesForContext,
-      assistant: assistant,
+      assistant: enhancedAssistant,
       onChunkReceived: streamProcessorCallbacks
     })
   } catch (error: any) {
