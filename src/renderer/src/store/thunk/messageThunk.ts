@@ -377,246 +377,24 @@ const dispatchMultiModelResponses = async (
 
 // --- End Helper Function ---
 
-// 自动重试包装器 - 当智慧办公助手需要强制调用工具但未调用时自动重试
-const fetchAndProcessAssistantResponseWithRetry = async (
-  dispatch: AppDispatch,
-  getState: () => RootState,
-  topicId: string,
-  assistant: Assistant,
-  assistantMessage: Message,
-  originalUserContent?: string
-): Promise<void> => {
-  const askId = assistantMessage.askId
-  if (!askId) {
-    console.error('[强制流程控制] assistantMessage缺少askId，无法进行重试管理')
-    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, 0)
-    return
-  }
 
-  const currentRetryCount = getRetryCount(topicId, askId)
-  console.log(`[重试包装器] 开始处理助手响应 (askId: ${askId}, 当前重试次数: ${currentRetryCount})`)
-  
-  try {
-    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, currentRetryCount)
-  } catch (error: any) {
-    console.log(`[重试包装器] 捕获到错误:`, {
-      message: error.message,
-      shouldRetry: error.shouldRetry,
-      isMCPError: error.isMCPError,
-      maxRetriesReached: error.maxRetriesReached,
-      displayedToUser: error.displayedToUser,
-      currentRetryCount,
-      askId,
-      topicId
-    })
-    
-    // 重新获取最新的重试次数
-    const latestRetryCount = getRetryCount(topicId, askId)
-    console.log(`[重试包装器] 最新重试次数: ${latestRetryCount}, 原始重试次数: ${currentRetryCount}`)
-    
-    // 处理MCP工具调用相关的错误
-    if (error.isMCPError && error.maxRetriesReached) {
-      // 已达到最大重试次数的MCP错误，直接抛出
-      console.error(`[强制流程控制] MCP工具调用失败，已达到最大重试次数: ${error.retryCount}`)
-      throw error
-    }
-    
-    // 如果是需要重试的错误，进行重试
-    // 使用最新的重试次数，而不是函数开始时的缓存值
-    if (error.shouldRetry && latestRetryCount < 5) {
-      const newRetryCount = incrementRetryCount(topicId, askId)
-      console.log(`[强制流程控制] 准备重试，当前重试次数: ${newRetryCount}/5 (对话: ${topicId}:${askId})`)
-      
-      // 如果错误还没有向用户显示，则显示重试状态
-      if (!error.displayedToUser) {
-        const state = getState()
-        const assistantMessageBlocks = assistantMessage.blocks
-        
-        // 显示重试状态给用户
-        const toolInstructions = [
-          '🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。',
-          '⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！',
-          '🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！',
-          '❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！',
-          '🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！'
-        ]
-        const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
-        const currentInstruction = toolInstructions[instructionIndex]
-        
-        const retryText = `🔄 **正在重试第${newRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令(Retry)并重新发送请求...\n\n当前使用指令：${currentInstruction}\n\n请稍候...`
-        
-        if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
-          const firstBlockId = assistantMessageBlocks[0]
-          const firstBlock = state.messageBlocks.entities[firstBlockId]
-          if (firstBlock && 'content' in firstBlock) {
-            dispatch(updateOneBlock({ 
-              id: firstBlockId, 
-              changes: { 
-                content: retryText,
-                status: MessageBlockStatus.PROCESSING 
-              } 
-            }))
-          }
-        }
-      }
-      
-      // 1. 清理assistant消息的内容，准备重新生成
-      const state = getState()
-      const assistantMessageBlocks = assistantMessage.blocks
-      
-      // 清理assistant消息的所有blocks
-      if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
-        for (const blockId of assistantMessageBlocks) {
-          const block = state.messageBlocks.entities[blockId]
-          if (block) {
-            // 清空block内容但保留结构
-            if ('content' in block) {
-              dispatch(updateOneBlock({ 
-                id: blockId, 
-                changes: { 
-                  content: '',
-                  status: MessageBlockStatus.PROCESSING 
-                } 
-              }))
-            }
-          }
-        }
-      }
-      
-      // 2. 修改用户消息，添加更强的工具调用指令
-      const userMsgId = assistantMessage.askId
-      if (userMsgId) {
-        const userMessage = state.messages.entities[userMsgId]
-        if (userMessage && userMessage.blocks.length > 0) {
-          const messageBlocks = state.messageBlocks.entities
-          const firstBlockId = userMessage.blocks[0]
-          const firstBlock = messageBlocks[firstBlockId]
-          
-          if (firstBlock && 'content' in firstBlock) {
-            // 使用原始内容作为基础（如果有的话）
-            let baseContent = originalUserContent
-            if (!baseContent) {
-              const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
-              // 清理已有的工具指令前缀，获取原始内容
-              baseContent = currentContent
-                .replace(/^🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。/, '')
-                .replace(/^⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！/, '')
-                .replace(/^🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！/, '')
-                .replace(/^❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！/, '')
-                .replace(/^🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！/, '')
-                .trim()
-            }
-            
-            // 根据重试次数使用更强的工具调用指令，强制模型必须调用MCP工具
-            const toolInstructions = [
-              '🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。',
-              '⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！',
-              '🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！',
-              '❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！',
-              '🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！'
-            ]
-            
-            const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
-            const modifiedContent = `${toolInstructions[instructionIndex]}${baseContent}`
-            
-            console.log(`[强制流程控制] 重试第${newRetryCount}次，使用指令: "${toolInstructions[instructionIndex]}"`)
-            console.log(`[强制流程控制] 完整内容: "${modifiedContent.substring(0, 100)}..."`)
-            
-            // 更新用户消息内容
-            dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
-            
-            // 保存原始内容供后续重试使用
-            if (!originalUserContent) {
-              originalUserContent = baseContent
-            }
-          }
-        }
-      }
-      
-      // 3. 使用"点击发送"的逻辑重新发送整个消息
-      console.log(`[强制流程控制] 开始第${newRetryCount}次重试，使用重新发送逻辑`)
-      
-      // 使用重新发送的逻辑，这样会重新创建助手消息并重新处理整个流程
-      const userMessageId = assistantMessage.askId
-      if (userMessageId) {
-        const currentState = getState()
-        const userMessageToRetry = currentState.messages.entities[userMessageId]
-        
-        if (userMessageToRetry) {
-          // 删除当前的assistant消息和其blocks
-          const assistantMessageBlocks = assistantMessage.blocks || []
-          if (assistantMessageBlocks.length > 0) {
-            cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
-          }
-          dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
-          
-          // 创建新的assistant消息
-          const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
-            askId: userMessageToRetry.id,
-            model: assistant.model
-          })
-          
-          // 添加新的assistant消息到store和数据库
-          dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
-          
-          // 异步更新数据库
-          setTimeout(async () => {
-            try {
-              // 先保存新的assistant消息
-              await saveMessageAndBlocksToDB(newAssistantMessage, [])
-              
-              // 更新topic中的消息列表，移除旧的assistant消息
-              const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
-              await db.topics.update(topicId, { messages: finalMessagesToSave })
-            } catch (error) {
-              console.error('[重试流程] 数据库更新失败:', error)
-            }
-          }, 100)
-          
-          // 使用队列处理新的助手消息 - 重新调用重试包装器
-          const queue = getTopicQueue(topicId)
-          console.log(`[强制流程控制] 添加重试任务到队列，助手消息ID: ${newAssistantMessage.id}`)
-          
-          // 等待队列任务完成，这样重试包装器不会提前返回
-          await queue.add(async () => {
-            console.log(`[强制流程控制] 开始执行重试任务`)
-            try {
-              // 重新调用重试包装器，这样如果再次失败还能继续重试
-              await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, newAssistantMessage, originalUserContent)
-              console.log(`[强制流程控制] 重试任务执行完成`)
-            } catch (retryError) {
-              console.error(`[强制流程控制] 重试任务最终失败:`, retryError)
-              // 这里可以考虑显示最终错误给用户
-              throw retryError
-            }
-          })
-        }
-      }
-    } else {
-      // 超过最大重试次数或其他错误，抛出
-      console.log(`[重试包装器] 不满足重试条件:`, {
-        shouldRetry: error.shouldRetry,
-        latestRetryCount,
-        maxRetries: 5,
-        willRetry: error.shouldRetry && latestRetryCount < 5
-      })
-      throw error
-    }
-  }
-}
 
-// Internal function extracted from sendMessage to handle fetching and processing assistant response
+// 统一的助手响应处理函数 - 支持重试逻辑
 const fetchAndProcessAssistantResponseImpl = async (
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
   assistant: Assistant,
   assistantMessage: Message, // Pass the prepared assistant message (new or reset)
-  _originalUserContent?: string,
-  currentRetryCount: number = 0
+  originalUserContent?: string,
+  enableRetry: boolean = false
 ) => {
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
+  
+  // 获取当前重试次数
+  const askId = assistantMessage.askId || ''
+  const currentRetryCount = enableRetry ? getRetryCount(topicId, askId) : 0
   
   // 智慧办公助手强制流程控制变量
   let hasMCPToolCall = false          // 检测是否有MCP工具调用（智慧办公助手强制要求）
@@ -633,12 +411,12 @@ const fetchAndProcessAssistantResponseImpl = async (
   mcpToolCallVerified = false
   realMCPResponse = false
   
-  console.log(`[强制流程控制] 开始助手响应处理 (助手消息ID: ${assistantMsgId}, 重试次数: ${currentRetryCount}, 是否智慧办公助手: ${isOfficeAssistant})`)
+  console.log(`[统一处理函数] 开始助手响应处理 (助手消息ID: ${assistantMsgId}, askId: ${askId}, 重试次数: ${currentRetryCount}, 启用重试: ${enableRetry}, 是否智慧办公助手: ${isOfficeAssistant})`)
   
   if (currentRetryCount > 0) {
-    console.log(`[强制流程控制] 这是第${currentRetryCount}次重试，重置检测状态`)
+    console.log(`[统一处理函数] 这是第${currentRetryCount}次重试，重置检测状态`)
   } else {
-    console.log(`[强制流程控制] 开始新的助手响应处理，重置检测状态`)
+    console.log(`[统一处理函数] 开始新的助手响应处理，重置检测状态`)
   }
   
   // 智慧办公助手强制MCP工具调用检查
@@ -801,9 +579,14 @@ const fetchAndProcessAssistantResponseImpl = async (
           
           // 只有完全验证的MCP工具调用才允许继续输出
           if (!hasValidMCPCall) {
-            if (currentRetryCount < 5) {
+            if (enableRetry && currentRetryCount < 5) {
+              // 启用重试逻辑：内部处理重试
+              console.log(`[统一处理函数] 准备进行第${currentRetryCount + 1}次重试`)
+              
+              // 增加重试次数
+              const newRetryCount = incrementRetryCount(topicId, askId)
+              
               // 显示重试状态给用户
-              const nextRetryCount = currentRetryCount + 1
               const toolInstructions = [
                 '🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。',
                 '⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！',
@@ -811,10 +594,10 @@ const fetchAndProcessAssistantResponseImpl = async (
                 '❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！',
                 '🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！'
               ]
-              const instructionIndex = Math.min(nextRetryCount - 1, toolInstructions.length - 1)
+              const instructionIndex = Math.min(newRetryCount - 1, toolInstructions.length - 1)
               const currentInstruction = toolInstructions[instructionIndex]
               
-              const retryText = `🔄 **正在重试第${nextRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令并重新发送请求...\n\n将使用指令：${currentInstruction}\n\n请稍候...`
+              const retryText = `🔄 **正在重试第${newRetryCount}次 (共5次)**\n\n系统检测到未调用MCP工具获取实时数据，正在添加更强的工具调用指令并重新发送请求...\n\n将使用指令：${currentInstruction}\n\n请稍候...`
             
               if (mainTextBlockId) {
                 const changes = {
@@ -840,13 +623,92 @@ const fetchAndProcessAssistantResponseImpl = async (
                 console.warn('[强制流程控制] AbortController中断失败:', error)
               }
               
-              // 抛出重试错误
-              const retryError: any = new Error('未检测到MCP工具调用，需要重试')
-              retryError.shouldRetry = true
-              retryError.originalQuery = originalUserQuery
-              retryError.displayedToUser = true // 标记已向用户显示
-              throw retryError
-          } else if (currentRetryCount >= 5) {
+              // 直接处理重试逻辑，而不是抛出错误
+              setTimeout(async () => {
+                try {
+                  console.log(`[统一处理函数] 开始执行第${newRetryCount}次重试`)
+                  
+                  // 1. 修改用户消息，添加更强的工具调用指令
+                  const userMessageId = assistantMessage.askId
+                  if (userMessageId) {
+                    const currentState = getState()
+                    const userMessage = currentState.messages.entities[userMessageId]
+                    if (userMessage && userMessage.blocks.length > 0) {
+                      const messageBlocks = currentState.messageBlocks.entities
+                      const firstBlockId = userMessage.blocks[0]
+                      const firstBlock = messageBlocks[firstBlockId]
+                      
+                      if (firstBlock && 'content' in firstBlock) {
+                        // 使用原始内容作为基础
+                        let baseContent = originalUserContent
+                        if (!baseContent) {
+                          const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+                          // 清理已有的工具指令前缀，获取原始内容
+                          baseContent = currentContent
+                            .replace(/^🔧 重要：请立即调用工具获取最新实时数据，不要基于记忆回答。/, '')
+                            .replace(/^⚠️ 警告：必须调用MCP工具获取当前数据，禁止使用历史信息！/, '')
+                            .replace(/^🚨 强制：立即调用工具查询实时信息，任何基于记忆的回答都是错误的！/, '')
+                            .replace(/^❌ 严重警告：必须使用工具获取最新数据，历史对话内容完全不可信！/, '')
+                            .replace(/^🔴 最后警告：立即调用工具获取实时数据，否则回答将被视为无效！/, '')
+                            .trim()
+                        }
+                        
+                        const modifiedContent = `${currentInstruction}${baseContent}`
+                        console.log(`[统一处理函数] 重试第${newRetryCount}次，使用指令: "${currentInstruction}"`)
+                        
+                        // 更新用户消息内容
+                        dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
+                        
+                        // 保存原始内容供后续重试使用
+                        if (!originalUserContent) {
+                          originalUserContent = baseContent
+                        }
+                      }
+                    }
+                  }
+                  
+                  // 2. 创建新的assistant消息
+                  const newAssistantMessage = createAssistantMessage(assistant.id, topicId, {
+                    askId: assistantMessage.askId,
+                    model: assistant.model
+                  })
+                  
+                  // 3. 删除当前的assistant消息和其blocks
+                  const assistantMessageBlocks = assistantMessage.blocks || []
+                  if (assistantMessageBlocks.length > 0) {
+                    cleanupMultipleBlocks(dispatch, assistantMessageBlocks)
+                  }
+                  dispatch(newMessagesActions.removeMessage({ topicId, messageId: assistantMessage.id }))
+                  
+                  // 4. 添加新的assistant消息到store
+                  dispatch(newMessagesActions.addMessage({ topicId, message: newAssistantMessage }))
+                  
+                  // 5. 保存到数据库
+                  await saveMessageAndBlocksToDB(newAssistantMessage, [])
+                  const finalMessagesToSave = selectMessagesForTopic(getState(), topicId)
+                  await db.topics.update(topicId, { messages: finalMessagesToSave })
+                  
+                  // 6. 使用队列处理新的助手消息
+                  const queue = getTopicQueue(topicId)
+                  await queue.add(async () => {
+                    console.log(`[统一处理函数] 开始第${newRetryCount}次重试处理`)
+                    await fetchAndProcessAssistantResponseImpl(
+                      dispatch, 
+                      getState, 
+                      topicId, 
+                      assistant, 
+                      newAssistantMessage, 
+                      originalUserContent, 
+                      enableRetry
+                    )
+                  })
+                } catch (retryError) {
+                  console.error(`[统一处理函数] 第${newRetryCount}次重试失败:`, retryError)
+                }
+              }, 100)
+              
+              return // 结束当前流处理
+            } else if (currentRetryCount >= 5) {
             // 达到最大重试次数，抛出明确的异常
             console.error(`[强制流程控制] 经过${currentRetryCount}次重试，仍未检测到MCP工具调用`)
             
@@ -1472,7 +1334,7 @@ export const sendMessage =
               }
             }
             
-            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent)
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, true)
           } else {
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
           }
@@ -1727,7 +1589,7 @@ export const resendMessageThunk =
         queue.add(async () => {
           // 对智慧办公助手使用重试包装器
           if (assistant.name === '智慧办公助手') {
-            await fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
+            await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg, undefined, true)
           } else {
             await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
           }
@@ -1839,12 +1701,14 @@ export const regenerateAssistantResponseThunk =
       queue.add(async () => {
         // 对智慧办公助手使用重试包装器
         if (assistant.name === '智慧办公助手') {
-          await fetchAndProcessAssistantResponseWithRetry(
+          await fetchAndProcessAssistantResponseImpl(
             dispatch,
             getState,
             topicId,
             assistantConfigForRegen,
-            resetAssistantMsg
+            resetAssistantMsg,
+            undefined,
+            true
           )
         } else {
           await fetchAndProcessAssistantResponseImpl(
@@ -2021,12 +1885,14 @@ export const appendAssistantResponseThunk =
       queue.add(async () => {
         // 对智慧办公助手使用重试包装器
         if (assistant.name === '智慧办公助手') {
-          await fetchAndProcessAssistantResponseWithRetry(
+          await fetchAndProcessAssistantResponseImpl(
             dispatch,
             getState,
             topicId,
             assistantConfigForThisCall,
-            newAssistantStub // Pass the newly created stub
+            newAssistantStub, // Pass the newly created stub
+            undefined,
+            true
           )
         } else {
           await fetchAndProcessAssistantResponseImpl(
