@@ -1,5 +1,4 @@
 import http from 'http'
-import { URL } from 'url'
 import Logger from 'electron-log'
 import { windowService } from './WindowService'
 import { IpcChannel } from '@shared/IpcChannel'
