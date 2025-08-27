@@ -611,11 +611,26 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       (_, selectedText: string) => onQuote(selectedText)
     )
 
+    // 监听语音消息事件
+    const voiceMessageRemover = window.electron?.ipcRenderer.on(
+      IpcChannel.App_SendVoiceMessage,
+      (_, voiceText: string) => {
+        if (voiceText && voiceText.trim()) {
+          setText(voiceText.trim())
+          // 自动发送消息
+          setTimeout(() => {
+            sendMessage()
+          }, 100)
+        }
+      }
+    )
+
     return () => {
       unsubscribes.forEach((unsub) => unsub())
       quoteFromAnywhereRemover?.()
+      voiceMessageRemover?.()
     }
-  }, [addNewTopic, onQuote])
+  }, [addNewTopic, onQuote, sendMessage, setText])
 
   useEffect(() => {
     if (!document.querySelector('.topview-fullscreen-container')) {

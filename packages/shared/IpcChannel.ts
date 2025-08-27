@@ -33,6 +33,7 @@ export enum IpcChannel {
   App_InstallBunBinary = 'app:install-bun-binary',
 
   App_QuoteToMain = 'app:quote-to-main',
+  App_SendVoiceMessage = 'app:send-voice-message',
 
   Notification_Send = 'notification:send',
   Notification_OnClick = 'notification:on-click',

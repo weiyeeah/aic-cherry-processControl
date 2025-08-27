@@ -24,6 +24,7 @@ import {
 import selectionService, { initSelectionService } from './services/SelectionService'
 import { registerShortcuts } from './services/ShortcutService'
 import { TrayService } from './services/TrayService'
+import { voiceApiService } from './services/VoiceApiService'
 import { windowService } from './services/WindowService'
 
 Logger.initialize()
@@ -119,6 +120,13 @@ if (!app.requestSingleInstanceLock()) {
 
     //start selection assistant service
     initSelectionService()
+
+    // 启动语音API服务器
+    try {
+      await voiceApiService.startServer()
+    } catch (error) {
+      Logger.error('Failed to start Voice API server:', error)
+    }
   })
 
   registerProtocolClient(app)
@@ -156,6 +164,7 @@ if (!app.requestSingleInstanceLock()) {
     // event.preventDefault()
     try {
       await mcpService.cleanup()
+      await voiceApiService.stopServer()
     } catch (error) {
       Logger.error('Error cleaning up MCP service:', error)
     }
