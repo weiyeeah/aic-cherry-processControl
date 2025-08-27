@@ -11,7 +11,7 @@ import json
 
 def send_voice_message(message):
     """发送语音消息到Cherry Studio"""
-    url = 'http://127.0.0.1:8765/voice'
+    url = 'http://127.0.0.1:8765/voice' # 8765是Cherry Studio的Voice API端口
     
     try:
         print(f'正在发送消息到 Cherry Studio...')
