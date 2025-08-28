@@ -194,7 +194,8 @@ const Link: React.FC<LinkProps> = (props) => {
   }
 
   // 根据链接类型决定是否默认打开预览
-  const shouldAutoPreview = !isDownloadLink(props.href || '')
+  // const shouldAutoPreview = !isDownloadLink(props.href || '')
+  const shouldAutoPreview = false // 默认关闭内联预览
   const [showInlinePreview, setShowInlinePreview] = useState(shouldAutoPreview) // 根据链接类型决定是否自动打开预览
   const [isLoading, setIsLoading] = useState(false)
   const webviewRef = useRef<WebviewTag | null>(null)
