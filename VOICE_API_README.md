@@ -2,21 +2,42 @@
 
 ## 概述
 
-Cherry Studio 现在支持通过 HTTP API 接口接收语音消息。该功能允许外部应用程序通过 POST 请求向 Cherry Studio 发送文本消息，支持流式输入和状态控制。
+Cherry Studio 现在支持完整的语音识别生态系统。系统包含三个组件：
+1. **Cherry Studio 前端** - 提供语音控制按钮和文本显示
+2. **Cherry Studio Voice API** - 接收语音文本的HTTP服务 (端口8765)
+3. **Python语音后端服务** - 执行语音识别并与前端通信 (端口8766)
+
+该架构支持流式输入、状态控制和完整的语音识别工作流。
 
 ## 功能特性
 
+### Cherry Studio Voice API (端口8765)
 - ✅ HTTP 服务器监听 `127.0.0.1:8765` 端口
 - ✅ 支持 `/voice` POST 端点接收语音文本
 - ✅ 支持 `/voice/toggle` POST 端点切换接收状态
 - ✅ 支持 `/voice/status` GET 端点查询状态
 - ✅ 支持流式输入（累计添加文本）
-- ✅ 前端语音按钮控制接收状态
 - ✅ 自动将接收到的文本设置到输入框
 - ✅ 支持 CORS 跨域请求
 - ✅ 完整的错误处理和日志记录
 
+### Python语音后端服务 (端口8766)
+- ✅ HTTP 服务器监听 `127.0.0.1:8766` 端口
+- ✅ 支持 `/voice/control` POST 端点接收控制指令
+- ✅ 支持 `/voice/status` POST 端点查询识别状态
+- ✅ 模拟语音识别并流式发送文字
+- ✅ 与Cherry Studio Voice API自动通信
+- ✅ 支持启动/停止语音识别
+
+### 前端集成
+- ✅ 语音按钮控制整个识别流程
+- ✅ 点击按钮同时通知两个后端服务
+- ✅ 智能状态管理和错误处理
+- ✅ 实时显示语音识别结果
+
 ## API 端点
+
+## Cherry Studio Voice API (端口8765)
 
 ### POST /voice
 
@@ -85,18 +106,103 @@ X-Voice-Streaming: true  # 可选，标识流式输入
 }
 ```
 
+## Python语音后端服务 (端口8766)
+
+### POST /voice/control
+
+**URL:** `http://127.0.0.1:8766/voice/control`
+
+**方法:** POST
+
+**功能:** 控制语音识别的启动和停止
+
+**请求体:**
+```json
+{
+  "action": "start",  // "start" 或 "stop"
+  "timestamp": "2024-01-01T00:00:00.000Z",
+  "targetUrl": "http://127.0.0.1:8765/voice"
+}
+```
+
+**响应:**
+```json
+{
+  "success": true,
+  "message": "语音识别已启动",
+  "status": "recording"  // "recording" 或 "stopped"
+}
+```
+
+### POST /voice/status
+
+**URL:** `http://127.0.0.1:8766/voice/status`
+
+**方法:** POST
+
+**功能:** 查询语音识别状态
+
+**响应:**
+```json
+{
+  "success": true,
+  "status": "recording",  // "recording" 或 "stopped"
+  "port": 8766,
+  "target_url": "http://127.0.0.1:8765/voice"
+}
+```
+
 ## 使用示例
 
-### 1. 启用语音接收
+### 完整工作流程
 
-首先需要启用语音接收功能：
+#### 1. 启动服务
 
 ```bash
-# 启用/禁用语音接收
+# 1. 启动Cherry Studio应用程序
+
+# 2. 启动Python语音后端服务
+python voice-backend-service.py
+
+# 可选：指定端口和目标URL
+python voice-backend-service.py 8766 http://127.0.0.1:8765/voice
+```
+
+#### 2. 前端操作流程
+
+1. **启用语音识别**：在Cherry Studio输入框工具栏点击语音按钮
+   - 前端会自动发送请求到Cherry Studio Voice API (8765端口)
+   - 同时通知Python后端服务 (8766端口) 开始语音识别
+
+2. **语音识别过程**：Python后端开始模拟语音识别
+   - 逐字识别并流式发送到Cherry Studio
+   - 文字实时显示在输入框中
+
+3. **停止语音识别**：再次点击语音按钮
+   - 停止Cherry Studio接收语音文字
+   - 通知Python后端停止语音识别
+
+#### 3. API控制示例
+
+```bash
+# 启用/禁用Cherry Studio语音接收
 curl -X POST http://127.0.0.1:8765/voice/toggle
 
-# 查询当前状态
+# 查询Cherry Studio状态
 curl http://127.0.0.1:8765/voice/status
+
+# 控制Python后端开始语音识别
+curl -X POST http://127.0.0.1:8766/voice/control \
+     -H "Content-Type: application/json" \
+     -d '{"action":"start","timestamp":"2024-01-01T00:00:00.000Z","targetUrl":"http://127.0.0.1:8765/voice"}'
+
+# 控制Python后端停止语音识别
+curl -X POST http://127.0.0.1:8766/voice/control \
+     -H "Content-Type: application/json" \
+     -d '{"action":"stop"}'
+
+# 查询Python后端状态
+curl -X POST http://127.0.0.1:8766/voice/status
 ```
 
 ### 2. 使用 curl 发送语音消息
@@ -195,9 +301,95 @@ def send_voice_message(message):
 send_voice_message("你好，这是通过Python发送的消息")
 ```
 
-## 测试脚本
+## 系统架构
 
-项目根目录下提供了两个测试脚本：
+### 组件关系图
+
+```
+┌─────────────────────┐    ┌──────────────────────┐    ┌─────────────────────┐
+│   Cherry Studio     │    │  Cherry Studio       │    │  Python语音后端     │
+│      前端           │    │   Voice API          │    │      服务           │
+│    (用户界面)        │    │   (端口 8765)        │    │   (端口 8766)       │
+└─────────────────────┘    └──────────────────────┘    └─────────────────────┘
+          │                           │                           │
+          │                           │                           │
+    [语音按钮点击]                [接收语音文字]              [执行语音识别]
+          │                           │                           │
+          ▼                           ▼                           ▼
+    ┌─────────────────────┐    ┌──────────────────────┐    ┌─────────────────────┐
+    │  1. 切换接收状态     │    │  1. 接收文字内容      │    │  1. 接收控制指令     │
+    │  → 8765/voice/toggle│    │  ← 8765/voice         │    │  ← 8766/voice/control│
+    │                     │    │                      │    │                     │
+    │  2. 通知Python后端   │    │  2. 发送到前端输入框  │    │  2. 启动/停止识别    │
+    │  → 8766/voice/control│    │  → IPC消息           │    │                     │
+    │                     │    │                      │    │  3. 流式发送文字     │
+    │  3. 更新按钮状态     │    │  3. 累计显示文字      │    │  → 8765/voice        │
+    └─────────────────────┘    └──────────────────────┘    └─────────────────────┘
+```
+
+### 数据流向
+
+1. **启动语音识别**
+   ```
+   用户点击语音按钮 
+   → 前端发送 POST /voice/toggle 到 Cherry Studio API
+   → 前端发送 POST /voice/control {"action": "start"} 到 Python后端
+   → Python后端开始语音识别循环
+   ```
+
+2. **语音识别过程**
+   ```
+   Python后端识别语音 
+   → 发送 POST /voice 带识别文字到 Cherry Studio API
+   → Cherry Studio API 通过 IPC 发送到前端
+   → 前端输入框累计显示文字
+   ```
+
+3. **停止语音识别**
+   ```
+   用户再次点击语音按钮
+   → 前端发送 POST /voice/toggle 到 Cherry Studio API  
+   → 前端发送 POST /voice/control {"action": "stop"} 到 Python后端
+   → Python后端停止语音识别循环
+   ```
+
+### 错误处理
+
+- **Python后端服务不可用**：前端会显示警告但不影响基本功能
+- **Cherry Studio API不可用**：Python后端会记录错误并继续尝试
+- **网络错误**：各组件都有超时和重试机制
+- **状态不同步**：可通过状态查询API进行同步
+
+## 测试脚本和服务
+
+项目根目录下提供了多个测试脚本和服务：
+
+### voice-backend-service.py (Python语音后端服务)
+```bash
+# 启动语音后端服务（默认端口8766）
+python voice-backend-service.py
+
+# 指定端口和目标URL
+python voice-backend-service.py 8766 http://127.0.0.1:8765/voice
+
+# 服务启动后会显示：
+# - 控制端点: POST http://127.0.0.1:8766/voice/control
+# - 状态查询: POST http://127.0.0.1:8766/voice/status
+```
+
+### test-voice-workflow.py (完整工作流程测试)
+```bash
+# 测试完整的语音识别工作流程
+python test-voice-workflow.py
+
+# 此脚本会：
+# 1. 检查所有服务状态
+# 2. 启用Cherry Studio语音接收
+# 3. 启动Python后端语音识别
+# 4. 模拟发送语音文字
+# 5. 停止语音识别
+# 6. 禁用语音接收
+```
 
 ### test-voice-api.js (Node.js)
 ```bash

@@ -782,6 +782,7 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
 
   const onToggleVoiceReceiving = async () => {
     try {
+      // 首先切换Cherry Studio内部的语音接收状态
       const response = await fetch('http://127.0.0.1:8765/voice/toggle', {
         method: 'POST',
         headers: {
@@ -793,6 +794,32 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       if (result.success) {
         setIsVoiceReceivingEnabled(result.enabled)
         console.log(`Voice receiving ${result.enabled ? 'enabled' : 'disabled'}`)
+
+        // 通知Python后端服务状态变更
+        try {
+          const pythonBackendUrl = 'http://127.0.0.1:8766/voice/control' // Python后端控制端点
+          const controlResponse = await fetch(pythonBackendUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              action: result.enabled ? 'start' : 'stop',
+              timestamp: new Date().toISOString(),
+              targetUrl: 'http://127.0.0.1:8765/voice'
+            })
+          })
+
+          if (controlResponse.ok) {
+            const controlResult = await controlResponse.json()
+            console.log(`Python backend notified: ${controlResult.message || 'success'}`)
+          } else {
+            console.warn(`Failed to notify Python backend: ${controlResponse.status}`)
+          }
+        } catch (pythonError) {
+          console.warn('Python backend service not available:', pythonError)
+          // 不影响主要功能，只是警告
+        }
       }
     } catch (error) {
       console.error('Failed to toggle voice receiving:', error)
