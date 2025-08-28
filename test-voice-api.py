@@ -16,7 +16,7 @@ import threading
 
 def send_voice_message(message, is_streaming=False):
     """发送语音消息到Cherry Studio"""
-    url = 'http://127.0.0.1:8765/voice' # 8765是Cherry Studio的Voice API端口
+    url = 'http://127.0.0.1:8765/voice' # 8765是Cherry Studio的Voice API端口 test
     
     try:
         print(f'正在发送消息到 Cherry Studio...')
