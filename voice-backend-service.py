@@ -59,49 +59,79 @@ class VoiceBackendService:
         """语音识别循环（模拟实现）"""
         logger.info("语音识别循环开始")
         
-        # 模拟语音识别数据
-        sample_sentences = [
-            "你好，这是语音识别的第一句话。",
-            "今天天气很好，适合出门散步。",
-            "请帮我分析一下最新的技术趋势。",
-            "我想了解人工智能的发展现状。",
-            "能否推荐一些优秀的学习资源？"
+        # 模拟语音识别数据 - 按段落组织
+        sample_paragraphs = [
+            [
+                "你好，这是语音识别的第一句话。",
+                "今天天气很好，适合出门散步。",
+                "希望我们的对话能够顺利进行。"
+            ],
+            [
+                "请帮我分析一下最新的技术趋势。",
+                "我想了解人工智能的发展现状。",
+                "特别是在自然语言处理方面的进展。"
+            ],
+            [
+                "能否推荐一些优秀的学习资源？",
+                "我希望能够深入学习相关技术。",
+                "谢谢你的帮助和建议。"
+            ],
+            [
+                "关于未来的发展方向，",
+                "我认为人工智能将会在更多领域发挥作用。",
+                "这对我们的工作和生活都将产生深远影响。"
+            ]
         ]
         
+        paragraph_index = 0
         sentence_index = 0
-        word_index = 0
-        current_text = ""
+        accumulated_text = ""
         
         while self.is_recording:
             try:
-                # 模拟逐字识别
-                if sentence_index < len(sample_sentences):
-                    sentence = sample_sentences[sentence_index]
-                    words = list(sentence)  # 按字符分割
+                # 获取当前段落
+                if paragraph_index < len(sample_paragraphs):
+                    current_paragraph = sample_paragraphs[paragraph_index]
                     
-                    if word_index < len(words):
-                        current_text += words[word_index]
+                    if sentence_index < len(current_paragraph):
+                        sentence = current_paragraph[sentence_index]
                         
-                        # 发送当前累计的文字到Cherry Studio
-                        success = self._send_to_cherry_studio(current_text, is_streaming=True)
+                        # 模拟语音识别过程（逐字识别但不发送）
+                        logger.info(f"正在识别: {sentence}")
+                        
+                        # 模拟识别时间（根据句子长度调整）
+                        recognition_time = len(sentence) * 0.1  # 每个字符0.1秒
+                        time.sleep(recognition_time)
+                        
+                        # 句子识别完成，添加到累计文本
+                        if accumulated_text:
+                            accumulated_text += " " + sentence
+                        else:
+                            accumulated_text = sentence
+                        
+                        # 发送当前累计的段落文字到Cherry Studio
+                        success = self._send_to_cherry_studio(accumulated_text, is_streaming=True)
                         if success:
-                            logger.info(f"发送文字: {current_text}")
+                            logger.info(f"发送段落: {accumulated_text}")
                         else:
                             logger.warning("发送到Cherry Studio失败")
-                            
-                        word_index += 1
-                        time.sleep(0.2)  # 模拟识别延迟
-                    else:
-                        # 当前句子完成，准备下一句
+                        
                         sentence_index += 1
-                        word_index = 0
-                        current_text = ""
-                        time.sleep(2)  # 句子间停顿
+                        time.sleep(1)  # 句子间停顿
+                    else:
+                        # 当前段落完成，准备下一段落
+                        paragraph_index += 1
+                        sentence_index = 0
+                        accumulated_text = ""  # 清空累计文本，开始新段落
+                        time.sleep(3)  # 段落间停顿
+                        logger.info("段落完成，开始下一段落...")
                 else:
-                    # 所有句子完成，重新开始
+                    # 所有段落完成，重新开始
+                    paragraph_index = 0
                     sentence_index = 0
-                    current_text = ""
-                    time.sleep(3)
+                    accumulated_text = ""
+                    time.sleep(5)  # 循环间停顿
+                    logger.info("所有段落完成，重新开始...")
                     
             except Exception as e:
                 logger.error(f"语音识别循环出错: {e}")

@@ -25,7 +25,7 @@ Cherry Studio 现在支持完整的语音识别生态系统。系统包含三个
 - ✅ HTTP 服务器监听 `127.0.0.1:8766` 端口
 - ✅ 支持 `/voice/control` POST 端点接收控制指令
 - ✅ 支持 `/voice/status` POST 端点查询识别状态
-- ✅ 模拟语音识别并流式发送文字
+- ✅ 模拟语音识别并按段落发送文字
 - ✅ 与Cherry Studio Voice API自动通信
 - ✅ 支持启动/停止语音识别
 
@@ -175,8 +175,8 @@ python voice-backend-service.py 8766 http://127.0.0.1:8765/voice
    - 同时通知Python后端服务 (8766端口) 开始语音识别
 
 2. **语音识别过程**：Python后端开始模拟语音识别
-   - 逐字识别并流式发送到Cherry Studio
-   - 文字实时显示在输入框中
+   - 按段落进行语音识别，每句话完成后累计发送
+   - 文字以段落形式实时显示在输入框中
 
 3. **停止语音识别**：再次点击语音按钮
    - 停止Cherry Studio接收语音文字
@@ -339,10 +339,11 @@ send_voice_message("你好，这是通过Python发送的消息")
 
 2. **语音识别过程**
    ```
-   Python后端识别语音 
-   → 发送 POST /voice 带识别文字到 Cherry Studio API
+   Python后端按段落识别语音 
+   → 每完成一句话，累计到当前段落
+   → 发送 POST /voice 带段落文字到 Cherry Studio API
    → Cherry Studio API 通过 IPC 发送到前端
-   → 前端输入框累计显示文字
+   → 前端输入框显示完整段落文字
    ```
 
 3. **停止语音识别**
@@ -389,6 +390,19 @@ python test-voice-workflow.py
 # 4. 模拟发送语音文字
 # 5. 停止语音识别
 # 6. 禁用语音接收
+```
+
+### test-paragraph-mode.py (段落模式测试)
+```bash
+# 测试段落模式的语音识别
+python test-paragraph-mode.py
+
+# 此脚本会：
+# 1. 检查所有服务状态
+# 2. 启动Python后端语音识别
+# 3. 运行20秒观察段落发送过程
+# 4. 自动停止语音识别
+# 5. 验证段落模式是否正常工作
 ```
 
 ### test-voice-api.js (Node.js)
