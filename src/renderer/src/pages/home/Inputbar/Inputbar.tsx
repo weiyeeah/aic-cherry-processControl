@@ -617,10 +617,10 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       (_, voiceText: string) => {
         if (voiceText && voiceText.trim()) {
           setText(voiceText.trim())
-          // 自动发送消息
-          setTimeout(() => {
-            sendMessage()
-          }, 100)
+          // // 自动发送消息
+          // setTimeout(() => {
+          //   sendMessage()
+          // }, 100)
         }
       }
     )

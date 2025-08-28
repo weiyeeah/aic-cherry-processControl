@@ -168,11 +168,27 @@ python test-voice-api.py "你好，这是自定义测试消息"
 
 2. **渲染进程 (Renderer Process)**
    - `Inputbar` 组件监听 `App_SendVoiceMessage` IPC 事件
+   - **智能验证**：检查当前是否有活跃的助手和话题
    - 自动设置文本内容并触发发送消息功能
+   - **精确发送**：消息只发送到当前选定的助手和话题
 
 3. **IPC 通信**
    - 新增 `App_SendVoiceMessage` IPC 通道
    - 主进程通过 `webContents.send()` 发送消息到渲染进程
+
+### 消息发送逻辑
+
+```typescript
+// 验证当前环境
+if (!assistant || !topic) {
+  console.warn('Voice message ignored: No active assistant or topic')
+  return
+}
+
+// 发送到当前选定的助手和话题
+setText(voiceText.trim())
+sendMessage() // 使用当前的 assistant 和 topic
+```
 
 ### 关键文件
 
