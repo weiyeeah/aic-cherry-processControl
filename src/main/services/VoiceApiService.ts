@@ -124,7 +124,7 @@ export class VoiceApiService {
     })
   }
 
-  private handleToggleVoiceReceiving(req: http.IncomingMessage, res: http.ServerResponse): void {
+  private handleToggleVoiceReceiving(_req: http.IncomingMessage, res: http.ServerResponse): void {
     this.isVoiceReceivingEnabled = !this.isVoiceReceivingEnabled
     
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -143,7 +143,7 @@ export class VoiceApiService {
     }
   }
 
-  private handleGetVoiceStatus(req: http.IncomingMessage, res: http.ServerResponse): void {
+  private handleGetVoiceStatus(_req: http.IncomingMessage, res: http.ServerResponse): void {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ 
       enabled: this.isVoiceReceivingEnabled,
