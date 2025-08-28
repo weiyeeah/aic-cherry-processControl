@@ -2,13 +2,17 @@
 
 ## 概述
 
-Cherry Studio 现在支持通过 HTTP API 接口接收语音消息并自动发送。该功能允许外部应用程序通过 POST 请求向 Cherry Studio 发送文本消息，模拟用户"点击发送"的操作。
+Cherry Studio 现在支持通过 HTTP API 接口接收语音消息。该功能允许外部应用程序通过 POST 请求向 Cherry Studio 发送文本消息，支持流式输入和状态控制。
 
 ## 功能特性
 
 - ✅ HTTP 服务器监听 `127.0.0.1:8765` 端口
-- ✅ 支持 `/voice` POST 端点
-- ✅ 自动将接收到的文本设置到输入框并发送
+- ✅ 支持 `/voice` POST 端点接收语音文本
+- ✅ 支持 `/voice/toggle` POST 端点切换接收状态
+- ✅ 支持 `/voice/status` GET 端点查询状态
+- ✅ 支持流式输入（累计添加文本）
+- ✅ 前端语音按钮控制接收状态
+- ✅ 自动将接收到的文本设置到输入框
 - ✅ 支持 CORS 跨域请求
 - ✅ 完整的错误处理和日志记录
 
@@ -22,11 +26,12 @@ Cherry Studio 现在支持通过 HTTP API 接口接收语音消息并自动发�
 
 **请求头:**
 ```
-Content-Type: text/plain
+Content-Type: text/plain; charset=utf-8
+X-Voice-Streaming: true  # 可选，标识流式输入
 ```
 
 **请求体:**
-- 发送要输入的文本内容（字符串格式）
+- 发送要输入的文本内容（字符串格式，支持UTF-8编码）
 
 **响应:**
 
@@ -35,23 +40,77 @@ Content-Type: text/plain
 {
   "success": true,
   "message": "Voice message sent successfully",
-  "receivedText": "你的消息内容"
+  "receivedText": "你的消息内容",
+  "isStreaming": true,
+  "enabled": true
 }
 ```
 
 错误响应:
+- 403: 语音接收已禁用
 - 404: 端点不存在
 - 500: 内部服务器错误
 - 503: 主窗口不可用
 
+### POST /voice/toggle
+
+**URL:** `http://127.0.0.1:8765/voice/toggle`
+
+**方法:** POST
+
+**功能:** 切换语音接收状态（启用/禁用）
+
+**响应:**
+```json
+{
+  "success": true,
+  "enabled": true,
+  "message": "Voice receiving enabled"
+}
+```
+
+### GET /voice/status
+
+**URL:** `http://127.0.0.1:8765/voice/status`
+
+**方法:** GET
+
+**功能:** 查询当前语音接收状态
+
+**响应:**
+```json
+{
+  "enabled": true,
+  "port": 8765
+}
+```
+
 ## 使用示例
 
-### 1. 使用 curl
+### 1. 启用语音接收
+
+首先需要启用语音接收功能：
+
+```bash
+# 启用/禁用语音接收
+curl -X POST http://127.0.0.1:8765/voice/toggle
+
+# 查询当前状态
+curl http://127.0.0.1:8765/voice/status
+```
+
+### 2. 使用 curl 发送语音消息
 
 ```bash
 # 发送简单文本消息
 curl -X POST http://127.0.0.1:8765/voice \
-     -H "Content-Type: text/plain" \
+     -H "Content-Type: text/plain; charset=utf-8" \
+     -d "你好，这是一条测试消息"
+
+# 发送流式消息
+curl -X POST http://127.0.0.1:8765/voice \
+     -H "Content-Type: text/plain; charset=utf-8" \
+     -H "X-Voice-Streaming: true" \
      -d "你好，这是通过API发送的消息"
 
 # 发送多行文本
@@ -156,7 +215,36 @@ python test-voice-api.py
 
 # 使用自定义消息测试
 python test-voice-api.py "你好，这是自定义测试消息"
+
+# 流式输入模式（交互式）
+python test-voice-api.py --stream
+
+# 逐字发送模式（模拟语音识别）
+python test-voice-api.py --word-by-word "这是 逐字 发送 的 测试"
+python test-voice-api.py --word-by-word  # 使用默认文本
 ```
+
+## 前端语音控制
+
+在 Cherry Studio 的输入框工具栏中新增了语音按钮，具有以下功能：
+
+### 语音按钮状态
+
+- 🎤 **启用状态**：麦克风图标，蓝色高亮，表示语音接收已启用
+- 🔇 **禁用状态**：静音图标，灰色，表示语音接收已禁用
+
+### 使用方法
+
+1. **启用语音接收**：点击语音按钮，图标变为蓝色麦克风
+2. **发送语音消息**：外部程序可通过 API 发送语音文本
+3. **流式输入**：支持累计接收和显示语音文本
+4. **禁用语音接收**：再次点击按钮，图标变为灰色静音图标
+
+### 流式输入特性
+
+- **累计模式**：新接收的文本会累计添加到输入框
+- **智能合并**：如果新文本包含当前文本，会智能替换而非重复
+- **实时显示**：文本实时显示在输入框中，用户可以看到语音识别过程
 
 ## 技术实现
 

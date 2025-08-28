@@ -41,7 +41,7 @@ import { Button, Tooltip } from 'antd'
 import TextArea, { TextAreaRef } from 'antd/es/input/TextArea'
 import dayjs from 'dayjs'
 import { debounce, isEmpty } from 'lodash'
-import { CirclePause, FileSearch, FileText, Upload } from 'lucide-react'
+import { CirclePause, FileSearch, FileText, Upload, Mic, MicOff } from 'lucide-react'
 import React, { CSSProperties, FC, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
@@ -102,6 +102,7 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
   const startDragY = useRef<number>(0)
   const startHeight = useRef<number>(0)
   const currentMessageId = useRef<string>('')
+  const [isVoiceReceivingEnabled, setIsVoiceReceivingEnabled] = useState(false)
   const isVision = useMemo(() => isVisionModel(model), [model])
   const supportExts = useMemo(() => [...textExts, ...documentExts, ...(isVision ? imageExts : [])], [isVision])
   const { bases: knowledgeBases } = useKnowledgeBases()
@@ -614,14 +615,52 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
     // 监听语音消息事件
     const voiceMessageRemover = window.electron?.ipcRenderer.on(
       IpcChannel.App_SendVoiceMessage,
-      (_, voiceText: string) => {
-        if (voiceText && voiceText.trim()) {
-          setText(voiceText.trim())
-          // // 自动发送消息
-          // setTimeout(() => {
-          //   sendMessage()
-          // }, 100)
+      (_, voiceData: string | { text: string; isStreaming: boolean }) => {
+        if (!isVoiceReceivingEnabled) {
+          return
         }
+
+        let voiceText: string
+        let isStreaming: boolean
+
+        if (typeof voiceData === 'string') {
+          voiceText = voiceData
+          isStreaming = false
+        } else {
+          voiceText = voiceData.text
+          isStreaming = voiceData.isStreaming
+        }
+
+        if (voiceText && voiceText.trim()) {
+          if (isStreaming) {
+            // 流式模式：累计添加文本
+            setText((prevText) => {
+              const currentText = prevText.trim()
+              const newText = voiceText.trim()
+
+              // 如果新文本包含了当前文本的内容，直接替换
+              if (newText.includes(currentText) && currentText) {
+                return newText
+              }
+              // 否则累计添加
+              return currentText ? `${currentText} ${newText}` : newText
+            })
+          } else {
+            // 非流式模式：直接替换
+            setText(voiceText.trim())
+          }
+
+          // 调整文本框高度
+          setTimeout(() => resizeTextArea(), 0)
+        }
+      }
+    )
+
+    // 监听语音接收状态变更
+    const voiceReceivingToggleRemover = window.electron?.ipcRenderer.on(
+      IpcChannel.App_VoiceReceivingToggled,
+      (_, enabled: boolean) => {
+        setIsVoiceReceivingEnabled(enabled)
       }
     )
 
@@ -629,6 +668,7 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
       unsubscribes.forEach((unsub) => unsub())
       quoteFromAnywhereRemover?.()
       voiceMessageRemover?.()
+      voiceReceivingToggleRemover?.()
     }
   }, [addNewTopic, onQuote, sendMessage, setText])
 
@@ -740,6 +780,25 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
     textareaRef.current?.focus()
   }
 
+  const onToggleVoiceReceiving = async () => {
+    try {
+      const response = await fetch('http://127.0.0.1:8765/voice/toggle', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+
+      const result = await response.json()
+      if (result.success) {
+        setIsVoiceReceivingEnabled(result.enabled)
+        console.log(`Voice receiving ${result.enabled ? 'enabled' : 'disabled'}`)
+      }
+    } catch (error) {
+      console.error('Failed to toggle voice receiving:', error)
+    }
+  }
+
   const isExpended = expended || !!textareaHeight
   const showThinkingButton = isSupportedThinkingTokenModel(model) || isSupportedReasoningEffortModel(model)
 
@@ -841,6 +900,24 @@ const Inputbar: FC<Props> = ({ assistant: _assistant, setActiveTopic, topic }) =
                 onClick={onNewContext}
               />
               {/* <TranslateButton text={text} onTranslated={onTranslated} isLoading={isTranslating} /> */}
+              <Tooltip
+                placement="top"
+                title={isVoiceReceivingEnabled ? t('chat.input.voice.disable') : t('chat.input.voice.enable')}
+                arrow
+              >
+                <ToolbarButton
+                  type="text"
+                  onClick={onToggleVoiceReceiving}
+                  className={isVoiceReceivingEnabled ? 'active' : ''}
+                  style={{ marginRight: -2, marginTop: 1 }}
+                >
+                  {isVoiceReceivingEnabled ? (
+                    <Mic style={{ color: 'var(--color-primary)', fontSize: 20 }} />
+                  ) : (
+                    <MicOff style={{ color: 'var(--color-icon)', fontSize: 20 }} />
+                  )}
+                </ToolbarButton>
+              </Tooltip>
               <MCPFileUploadButton ToolbarButton={ToolbarButton} />
               {loading && (
                 <Tooltip placement="top" title={t('chat.input.pause')} arrow>

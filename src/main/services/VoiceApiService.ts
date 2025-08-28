@@ -7,6 +7,7 @@ export class VoiceApiService {
   private static instance: VoiceApiService | null = null
   private server: http.Server | null = null
   private readonly port = 8765
+  private isVoiceReceivingEnabled = false
 
   public static getInstance(): VoiceApiService {
     if (!VoiceApiService.instance) {
@@ -34,9 +35,13 @@ export class VoiceApiService {
         return
       }
 
-      // 只处理 POST 请求到 /voice 端点
+      // 处理不同的端点
       if (req.method === 'POST' && req.url === '/voice') {
         this.handleVoiceMessage(req, res)
+      } else if (req.method === 'POST' && req.url === '/voice/toggle') {
+        this.handleToggleVoiceReceiving(req, res)
+      } else if (req.method === 'GET' && req.url === '/voice/status') {
+        this.handleGetVoiceStatus(req, res)
       } else {
         res.writeHead(404, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Endpoint not found' }))
@@ -61,7 +66,18 @@ export class VoiceApiService {
   }
 
   private handleVoiceMessage(req: http.IncomingMessage, res: http.ServerResponse): void {
+    // 检查是否启用了语音接收
+    if (!this.isVoiceReceivingEnabled) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ 
+        error: 'Voice receiving is disabled',
+        enabled: false
+      }))
+      return
+    }
+
     let body = ''
+    const isStreaming = req.headers['x-voice-streaming'] === 'true'
 
     req.on('data', (chunk) => {
       body += chunk.toString()
@@ -77,18 +93,23 @@ export class VoiceApiService {
           return
         }
 
-        // 发送消息到渲染进程
-        mainWindow.webContents.send(IpcChannel.App_SendVoiceMessage, body)
+        // 发送消息到渲染进程，包含流式标识
+        mainWindow.webContents.send(IpcChannel.App_SendVoiceMessage, {
+          text: body,
+          isStreaming: isStreaming
+        })
 
         // 返回成功响应
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ 
           success: true, 
           message: 'Voice message sent successfully',
-          receivedText: body
+          receivedText: body,
+          isStreaming: isStreaming,
+          enabled: this.isVoiceReceivingEnabled
         }))
 
-        Logger.info('Voice message sent to renderer process:', body)
+        Logger.info('Voice message sent to renderer process:', { text: body, isStreaming })
       } catch (error) {
         Logger.error('Error handling voice message:', error)
         res.writeHead(500, { 'Content-Type': 'application/json' })
@@ -101,6 +122,33 @@ export class VoiceApiService {
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Bad request' }))
     })
+  }
+
+  private handleToggleVoiceReceiving(req: http.IncomingMessage, res: http.ServerResponse): void {
+    this.isVoiceReceivingEnabled = !this.isVoiceReceivingEnabled
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ 
+      success: true,
+      enabled: this.isVoiceReceivingEnabled,
+      message: this.isVoiceReceivingEnabled ? 'Voice receiving enabled' : 'Voice receiving disabled'
+    }))
+
+    Logger.info(`Voice receiving ${this.isVoiceReceivingEnabled ? 'enabled' : 'disabled'}`)
+
+    // 通知前端状态变更
+    const mainWindow = windowService.getMainWindow()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(IpcChannel.App_VoiceReceivingToggled, this.isVoiceReceivingEnabled)
+    }
+  }
+
+  private handleGetVoiceStatus(req: http.IncomingMessage, res: http.ServerResponse): void {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ 
+      enabled: this.isVoiceReceivingEnabled,
+      port: this.port
+    }))
   }
 
   public async stopServer(): Promise<void> {
