@@ -417,8 +417,8 @@ export const SYSTEM_MODELS: Record<string, Model[]> = {
   defaultModel: [
     {
       // 默认助手模型
-      id: 'deepseek-ai/DeepSeek-V3',
-      name: 'deepseek-ai/DeepSeek-V3',
+      id: 'deepseek-ai/DeepSeek-V3.1',
+      name: 'deepseek-ai/DeepSeek-V3.1',
       provider: 'silicon',
       group: 'deepseek-ai'
     },
@@ -431,15 +431,15 @@ export const SYSTEM_MODELS: Record<string, Model[]> = {
     },
     {
       // 默认翻译模型
-      id: 'deepseek-ai/DeepSeek-V3',
-      name: 'deepseek-ai/DeepSeek-V3',
+      id: 'deepseek-ai/DeepSeek-V3.1',
+      name: 'deepseek-ai/DeepSeek-V3.1',
       provider: 'silicon',
       group: 'deepseek-ai'
     },
     {
       // 默认快捷助手模型
-      id: 'deepseek-ai/DeepSeek-V3',
-      name: 'deepseek-ai/DeepSeek-V3',
+      id: 'deepseek-ai/DeepSeek-V3.1',
+      name: 'deepseek-ai/DeepSeek-V3.1',
       provider: 'silicon',
       group: 'deepseek-ai'
     }
@@ -607,7 +607,8 @@ export const SYSTEM_MODELS: Record<string, Model[]> = {
     { id: 'gemini-2.0-flash', provider: 'burncloud', name: 'Gemini 2.0 Flash', group: 'Geminit 2.0' },
 
     { id: 'deepseek-r1', name: 'DeepSeek-R1', provider: 'burncloud', group: 'deepseek-ai' },
-    { id: 'deepseek-v3', name: 'DeepSeek-V3', provider: 'burncloud', group: 'deepseek-ai' }
+    { id: 'deepseek-v3', name: 'DeepSeek-V3', provider: 'burncloud', group: 'deepseek-ai' },
+    { id: 'deepseek-v3.1', name: 'DeepSeek-V3.1', provider: 'burncloud', group: 'deepseek-ai' }
   ],
 
   o3: [
@@ -702,6 +703,12 @@ export const SYSTEM_MODELS: Record<string, Model[]> = {
       group: 'DeepSeek'
     },
     {
+      id: 'deepseek-ai/DeepSeek-V3.1',
+      provider: 'o3',
+      name: 'DeepSeek V3.1',
+      group: 'DeepSeek'
+    },
+    {
       id: 'text-embedding-3-small',
       provider: 'o3',
       name: 'text-embedding-3-small',
@@ -744,6 +751,12 @@ export const SYSTEM_MODELS: Record<string, Model[]> = {
     {
       id: 'deepseek-ai/DeepSeek-V3',
       name: 'deepseek-ai/DeepSeek-V3',
+      provider: 'silicon',
+      group: 'deepseek-ai'
+    },
+    {
+      id: 'deepseek-ai/DeepSeek-V3.1',
+      name: 'deepseek-ai/DeepSeek-V3.1',
       provider: 'silicon',
       group: 'deepseek-ai'
     },
@@ -1758,6 +1771,12 @@ export const SYSTEM_MODELS: Record<string, Model[]> = {
       id: 'deepseek/deepseek-chat',
       provider: 'openrouter',
       name: 'DeepSeek: V3',
+      group: 'deepseek'
+    },
+    {
+      id: 'deepseek/deepseek-v3.1',
+      provider: 'openrouter',
+      name: 'DeepSeek: V3.1',
       group: 'deepseek'
     },
     {
