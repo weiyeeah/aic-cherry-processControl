@@ -138,7 +138,7 @@ export function useAppInit() {
           name: 'teable-server',
           type: 'streamableHttp' as const,
           description: 'Teable多维表格服务',
-          baseUrl: 'http://127.0.0.1:6008/mcp-v3',
+          baseUrl: 'http://127.0.0.1:6008/mcp-teable',
           isActive: true
         }
         dispatch(addMCPServer(teableServer))
