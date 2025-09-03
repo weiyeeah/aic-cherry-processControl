@@ -127,9 +127,17 @@ export function useAppInit() {
     // TODO: init data collection
   }, [enableDataCollection])
 
-  // 初始化默认MCP服务
+  // 初始化默认配置
   useEffect(() => {
     const initializeDefaults = async () => {
+      // 设置默认硅基流动API密钥
+      const siliconProvider = await db.providers.where('id').equals('silicon').first()
+      if (siliconProvider && !siliconProvider.apiKey) {
+        await db.providers.update('silicon', { 
+          apiKey: 'sk-ktficbaurnhwtomuwfqypwcpqhvdmgycaaoyqzelgzzwashx'
+        })
+      }
+
       // 检查并创建默认MCP服务
       const teableServerExists = mcpServers.find(s => s.name === 'teable-server')
       if (!teableServerExists) {
