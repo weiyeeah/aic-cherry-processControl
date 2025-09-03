@@ -4,8 +4,9 @@ import { useTheme } from '@renderer/context/ThemeProvider'
 import db from '@renderer/databases'
 import i18n from '@renderer/i18n'
 import KnowledgeQueue from '@renderer/queue/KnowledgeQueue'
-import { useAppDispatch } from '@renderer/store'
+import { useAppDispatch, useAppSelector } from '@renderer/store'
 
+import { updateProvider } from '@renderer/store/llm'
 import { addMCPServer } from '@renderer/store/mcp'
 import { setAvatar, setFilesPath, setResourcesPath, setUpdateState } from '@renderer/store/runtime'
 import { delay, runAsyncFunction } from '@renderer/utils'
@@ -22,6 +23,7 @@ import useUpdateHandler from './useUpdateHandler'
 
 export function useAppInit() {
   const dispatch = useAppDispatch()
+  const providers = useAppSelector((state) => state.llm.providers)
   const { proxyUrl, language, windowStyle, autoCheckUpdate, proxyMode, customCss, enableDataCollection } = useSettings()
   const { minappShow } = useRuntime()
   const { setDefaultModel, setTopicNamingModel, setTranslateModel } = useDefaultModel()
@@ -131,11 +133,12 @@ export function useAppInit() {
   useEffect(() => {
     const initializeDefaults = async () => {
       // 设置默认硅基流动API密钥
-      const siliconProvider = await db.providers.where('id').equals('silicon').first()
+      const siliconProvider = providers.find(p => p.id === 'silicon')
       if (siliconProvider && !siliconProvider.apiKey) {
-        await db.providers.update('silicon', { 
+        dispatch(updateProvider({ 
+          ...siliconProvider,
           apiKey: 'sk-ktficbaurnhwtomuwfqypwcpqhvdmgycaaoyqzelgzzwashx'
-        })
+        }))
       }
 
       // 检查并创建默认MCP服务
@@ -168,5 +171,5 @@ export function useAppInit() {
 
     // 只在第一次加载时执行初始化
     initializeDefaults()
-  }, [mcpServers, dispatch])
+  }, [providers, mcpServers, dispatch])
 }
