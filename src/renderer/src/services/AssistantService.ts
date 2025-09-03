@@ -161,8 +161,8 @@ tableId: "动态获取"
     messages: [],
     type: 'assistant' as const,
     model: {
-      id: 'deepseek-ai/DeepSeek-V3.1',
-      name: 'deepseek-ai/DeepSeek-V3.1',
+      id: 'deepseek-ai/DeepSeek-V3',
+      name: 'deepseek-ai/DeepSeek-V3',
       provider: 'silicon',
       group: 'deepseek-ai'
     },
