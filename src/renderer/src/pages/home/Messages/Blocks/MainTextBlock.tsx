@@ -37,19 +37,19 @@ const MainTextBlock: React.FC<Props> = ({ block, citationBlockId, role, mentions
 
   const processedContent = useMemo(() => {
     let content = block.content
-    
+
     // 隐藏工具调用指令（仅在UI显示时过滤，不影响后台发送）
     // 如果是用户消息，过滤掉工具指令前缀
     if (role === 'user') {
       content = content
-        .replace(/^请调用工具。/, '')
-        .replace(/^请务必调用工具获取实时数据。/, '')
+        .replace(/^请调用工具: /, '')
+        .replace(/^请务必调用工具获取实时数据: /, '')
         .replace(/^重要：必须调用MCP工具！/, '')
         .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
         .replace(/^强制要求：立即调用工具获取数据！/, '')
         .trim()
     }
-    
+
     // Update condition to use citationBlockId
     if (!block.citationReferences?.length || !citationBlockId || formattedCitations.length === 0) {
       return content
