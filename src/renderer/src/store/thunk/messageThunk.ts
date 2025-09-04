@@ -381,8 +381,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
               const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
               // 清理已有的工具指令前缀，获取原始内容
               baseContent = currentContent
-                .replace(/^请调用工具。/, '')
-                .replace(/^请务必调用工具获取实时数据。/, '')
+                .replace(/^请调用工具:/, '')
+                .replace(/^请务必调用工具获取实时数据:/, '')
                 .replace(/^重要：必须调用MCP工具！/, '')
                 .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
                 .replace(/^强制要求：立即调用工具获取数据！/, '')
@@ -391,8 +391,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
             
             // 根据重试次数使用更强的指令
             const toolInstructions = [
-              '请调用工具。',
-              '请务必调用工具获取实时数据。',
+              '请调用工具:',
+              '请务必调用工具获取实时数据:',
               '重要：必须调用MCP工具！',
               '警告：禁止使用记忆，必须调用工具！',
               '强制要求：立即调用工具获取数据！'
@@ -1185,7 +1185,7 @@ export const sendMessage =
                   
                   // 保存原始用户内容（清理工具指令）
                   originalUserContent = currentContent
-                    .replace(/^请调用工具。/, '')
+                    .replace(/^请调用工具:/, '')
                     .replace(/^请务必调用工具获取实时数据。/, '')
                     .replace(/^重要：必须调用MCP工具！/, '')
                     .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
@@ -1194,7 +1194,7 @@ export const sendMessage =
                   
                   // 检查是否已经包含工具调用指令，避免重复添加
                   if (!currentContent.startsWith('请调用工具')) {
-                    const modifiedContent = `请调用工具。${originalUserContent}`
+                    const modifiedContent = `请调用工具:${originalUserContent}`
                     dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
                     console.log('[强制流程控制] 已在用户查询前添加工具调用指令')
                   }
