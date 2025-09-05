@@ -457,8 +457,8 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   coordinator.isRetrying = true
   coordinator.retryCount = retryCount
   
-  // 3. 标记消息为重试状态，设置阻塞期
-  const retryBlockedUntil = Date.now() + 3000 // 3秒阻塞期
+  // 3. 标记消息为重试状态，设置较短的阻塞期（仅阻止中断信号）
+  const retryBlockedUntil = Date.now() + 1500 // 1.5秒阻塞期，足够处理中断
   dispatch(newMessagesActions.updateMessage({
     topicId,
     messageId: assistantMsgId,
@@ -471,6 +471,11 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   
   try {
     console.log(`[重试协调器] 开始处理，重试次数: ${retryCount}, 阻塞至: ${new Date(retryBlockedUntil).toLocaleTimeString()}`)
+    
+    // 确保状态变量在每次重试时都正确重置
+    if (retryCount > 0) {
+      console.log(`[重试协调器] 第${retryCount}次重试，确保状态重置`)
+    }
     
     await fetchAndProcessAssistantResponseImpl(
       dispatch, 
@@ -532,6 +537,16 @@ const fetchAndProcessAssistantResponseWithRetry = async (
       // 延迟重试，确保所有清理工作完成
       setTimeout(() => {
         console.log(`[重试协调器] 开始第${retryCount + 1}次重试`)
+        
+        // 清除阻塞期，准备新的重试
+        dispatch(newMessagesActions.updateMessage({
+          topicId,
+          messageId: assistantMsgId,
+          updates: { 
+            retryBlockedUntil: undefined
+          }
+        }))
+        
         fetchAndProcessAssistantResponseWithRetry(
           dispatch, 
           getState, 
@@ -1119,29 +1134,23 @@ const fetchAndProcessAssistantResponseImpl = async (
       onError: async (error) => {
         console.dir(error, { depth: null })
         
-        // 竞态条件防护：检查消息是否在重试状态
+        // 竞态条件防护：只在特定条件下阻止错误信号
         const coordinator = retryCoordinators.get(assistantMsgId)
-        if (coordinator?.isRetrying) {
-          console.log(`[重试协调器] 消息 ${assistantMsgId} 正在重试中，忽略错误信号`)
-          return
-        }
-        
         const state = getState()
         const currentMsg = state.messages.entities[assistantMsgId]
+        const now = Date.now()
         
-        // 检查消息是否在阻塞期内
-        if (currentMsg?.retryBlockedUntil && Date.now() < currentMsg.retryBlockedUntil) {
-          console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略错误信号`)
+        // 检查是否是重试引起的中断错误信号（非真正的错误）
+        const isRetryInterruption = coordinator?.isRetrying && 
+                                   currentMsg?.retryBlockedUntil && 
+                                   now < currentMsg.retryBlockedUntil
+        
+        if (isRetryInterruption) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略中断错误信号`)
           return
         }
         
-        // 如果消息标记为重试状态，也忽略错误信号
-        if (currentMsg?.isRetrying) {
-          console.log(`[重试协调器] 消息 ${assistantMsgId} 标记为重试状态，忽略错误信号`)
-          return
-        }
-        
-        console.log(`[重试协调器] 处理错误信号:`, error.message)
+        console.log(`[重试协调器] 处理错误信号: ${error.message}, 重试状态: ${coordinator?.isRetrying}`)
         
         const isErrorTypeAbort = isAbortError(error)
         let pauseErrorLanguagePlaceholder = ''
@@ -1200,26 +1209,22 @@ const fetchAndProcessAssistantResponseImpl = async (
         const finalStateOnComplete = getState()
         const finalAssistantMsg = finalStateOnComplete.messages.entities[assistantMsgId]
         
-        // 竞态条件防护：检查消息是否在重试状态
+        // 竞态条件防护：只在特定条件下阻止完成信号
         const coordinator = retryCoordinators.get(assistantMsgId)
-        if (coordinator?.isRetrying) {
-          console.log(`[重试协调器] 消息 ${assistantMsgId} 正在重试中，忽略完成信号`)
+        const now = Date.now()
+        
+        // 检查是否是重试引起的中断完成信号（非真正的完成）
+        const isRetryInterruption = coordinator?.isRetrying && 
+                                   finalAssistantMsg?.retryBlockedUntil && 
+                                   now < finalAssistantMsg.retryBlockedUntil
+        
+        if (isRetryInterruption) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略中断完成信号`)
           return
         }
         
-        // 检查消息是否在阻塞期内
-        if (finalAssistantMsg?.retryBlockedUntil && Date.now() < finalAssistantMsg.retryBlockedUntil) {
-          console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略完成信号`)
-          return
-        }
-        
-        // 如果消息标记为重试状态，也忽略完成信号
-        if (finalAssistantMsg?.isRetrying) {
-          console.log(`[重试协调器] 消息 ${assistantMsgId} 标记为重试状态，忽略完成信号`)
-          return
-        }
-
-        console.log(`[重试协调器] 处理消息完成信号，状态: ${status}`)
+        // 如果不在重试状态，或者是真正的完成，则处理完成信号
+        console.log(`[重试协调器] 处理消息完成信号，状态: ${status}, 重试状态: ${coordinator?.isRetrying}, 阻塞期: ${finalAssistantMsg?.retryBlockedUntil ? new Date(finalAssistantMsg.retryBlockedUntil).toLocaleTimeString() : 'none'}`)
 
         if (status === 'success' && finalAssistantMsg) {
           const userMsgId = finalAssistantMsg.askId
@@ -1289,6 +1294,22 @@ const fetchAndProcessAssistantResponseImpl = async (
           })
         )
         saveUpdatesToDB(assistantMsgId, topicId, messageUpdates, [])
+
+        // 清理重试状态（如果存在）
+        cleanupRetryCoordinator(assistantMsgId)
+        
+        // 清理消息中的重试标记
+        if (finalAssistantMsg?.isRetrying || finalAssistantMsg?.retryBlockedUntil) {
+          dispatch(newMessagesActions.updateMessage({
+            topicId,
+            messageId: assistantMsgId,
+            updates: { 
+              isRetrying: false, 
+              retryBlockedUntil: undefined,
+              retryAttempts: undefined
+            }
+          }))
+        }
 
         EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
       }
