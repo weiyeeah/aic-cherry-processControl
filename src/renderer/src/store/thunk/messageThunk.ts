@@ -472,9 +472,19 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   try {
     console.log(`[重试协调器] 开始处理，重试次数: ${retryCount}, 阻塞至: ${new Date(retryBlockedUntil).toLocaleTimeString()}`)
     
-    // 确保状态变量在每次重试时都正确重置
+    // 如果是重试（retryCount > 0），需要重新设置较短的阻塞期，确保MCP检测能够生效
     if (retryCount > 0) {
-      console.log(`[重试协调器] 第${retryCount}次重试，确保状态重置`)
+      console.log(`[重试协调器] 第${retryCount}次重试，重置阻塞期以确保MCP检测生效`)
+      
+      // 重试时设置更短的阻塞期，主要是为了防止早期的完成信号
+      const shortBlockingPeriod = Date.now() + 800 // 800ms短阻塞
+      dispatch(newMessagesActions.updateMessage({
+        topicId,
+        messageId: assistantMsgId,
+        updates: { 
+          retryBlockedUntil: shortBlockingPeriod
+        }
+      }))
     }
     
     await fetchAndProcessAssistantResponseImpl(
@@ -534,18 +544,18 @@ const fetchAndProcessAssistantResponseWithRetry = async (
         retryCount
       )
       
+      // 立即清除阻塞期，确保下次重试时MCP检测能正常工作
+      dispatch(newMessagesActions.updateMessage({
+        topicId,
+        messageId: assistantMsgId,
+        updates: { 
+          retryBlockedUntil: undefined  // 立即清除，避免影响下次检测
+        }
+      }))
+      
       // 延迟重试，确保所有清理工作完成
       setTimeout(() => {
         console.log(`[重试协调器] 开始第${retryCount + 1}次重试`)
-        
-        // 清除阻塞期，准备新的重试
-        dispatch(newMessagesActions.updateMessage({
-          topicId,
-          messageId: assistantMsgId,
-          updates: { 
-            retryBlockedUntil: undefined
-          }
-        }))
         
         fetchAndProcessAssistantResponseWithRetry(
           dispatch, 
@@ -556,11 +566,53 @@ const fetchAndProcessAssistantResponseWithRetry = async (
           updatedOriginalContent, 
           retryCount + 1
         )
-      }, 1000) // 减少延迟，提高响应性
+      }, 800) // 减少延迟，提高响应性
       
     } else {
       // 超过最大重试次数或其他错误，清理状态并抛出
       cleanupRetryCoordinator(assistantMsgId)
+      
+      // 如果是MCP调用失败，显示特定的错误信息
+      if (error.isMCPFailure) {
+        const errorText = `❌ **MCP工具调用失败**\n\n经过${error.retryCount || 10}次重试，智慧办公助手始终未能调用MCP工具获取实时数据。\n\n可能原因：\n- MCP服务未启动或配置错误\n- 网络连接问题\n- 工具权限不足\n\n请检查MCP配置后重新提问。`
+        
+        // 获取当前消息的块并更新错误内容
+        const state = getState()
+        const currentMsg = state.messages.entities[assistantMsgId]
+        if (currentMsg && currentMsg.blocks.length > 0) {
+          const lastBlockId = currentMsg.blocks[currentMsg.blocks.length - 1]
+          dispatch(updateOneBlock({ 
+            id: lastBlockId, 
+            changes: { 
+              content: errorText,
+              status: MessageBlockStatus.ERROR
+            } 
+          }))
+        }
+        
+        dispatch(newMessagesActions.updateMessage({
+          topicId,
+          messageId: assistantMsgId,
+          updates: { 
+            status: AssistantMessageStatus.ERROR,
+            isRetrying: false, 
+            retryBlockedUntil: undefined,
+            retryAttempts: undefined
+          }
+        }))
+        
+        // 发送错误完成信号
+        setTimeout(() => {
+          EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { 
+            id: assistantMsgId, 
+            topicId, 
+            status: 'error',
+            error: error.message
+          })
+        }, 100)
+        
+        return // 不再抛出错误，已经处理完毕
+      }
       
       dispatch(newMessagesActions.updateMessage({
         topicId,
@@ -590,7 +642,7 @@ const fetchAndProcessAssistantResponseImpl = async (
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
   
-  // 智慧办公助手强制流程控制变量
+  // 智慧办公助手强制流程控制变量 - 每次调用都重新初始化
   let hasToolCall = false
   let hasMCPToolCall = false // 专门检测MCP工具调用
   let isOfficeAssistant = assistant.name === '智慧办公助手'
@@ -599,9 +651,13 @@ const fetchAndProcessAssistantResponseImpl = async (
   // 使用currentRetryCount参数，无需本地变量
   let originalUserQuery = '' // 原始用户问题
   
+  // 详细日志：显示每次调用的初始状态
+  console.log(`[MCP检测] 初始化检测状态 - 重试次数: ${currentRetryCount}, 助手: ${assistant.name}, 是智慧办公助手: ${isOfficeAssistant}`)
+  console.log(`[MCP检测] 初始检测变量 - hasToolCall: ${hasToolCall}, hasMCPToolCall: ${hasMCPToolCall}, textLength: ${textLength}`)
+  
   // 如果是重试，重置强制检测状态
   if (currentRetryCount > 0) {
-    console.log(`[强制流程控制] 这是第${currentRetryCount}次重试，重置检测状态`)
+    console.log(`[强制流程控制] 这是第${currentRetryCount}次重试，检测状态已重置`)
   }
   
   // 智慧办公助手强制MCP工具调用检查
@@ -735,8 +791,14 @@ const fetchAndProcessAssistantResponseImpl = async (
         textLength += text.length
         
         // 智慧办公助手强制流程控制：检测未调用工具的文本生成
-        // 所有查询都强制要求调用工具，使用极低阈值(15字符)几乎立即中断并重试
+        // 所有查询都强制要求调用工具，使用极低阈值(180字符)几乎立即中断并重试
         const textThreshold = 180
+        
+        // 增强日志：每次文本块都记录检测状态
+        if (isOfficeAssistant) {
+          console.log(`[MCP检测] 文本块处理 - 当前长度: ${textLength}, 阈值: ${textThreshold}, hasMCPToolCall: ${hasMCPToolCall}, 重试次数: ${currentRetryCount}`)
+        }
+        
         if (isOfficeAssistant && !hasMCPToolCall && textLength > textThreshold) {
           console.warn(`[强制流程控制] 智慧办公助手尝试基于记忆回答查询，准备自动重试`)
           console.log(`[强制流程控制] 检测状态详情:`, {
@@ -783,28 +845,14 @@ const fetchAndProcessAssistantResponseImpl = async (
             retryError.originalQuery = originalUserQuery
             throw retryError
           } else if (currentRetryCount >= 10) {
-            // 达到最大重试次数，显示最终错误
-            const errorText = '❌ **无法获取实时数据**\n\n经过多次尝试，系统仍无法调用MCP工具获取实时数据。请检查工具配置或重新提问。'
+            // 达到最大重试次数，抛出具体的MCP调用失败错误
+            console.error(`[强制流程控制] 达到最大重试次数(${currentRetryCount}/10)，MCP工具始终未被调用`)
             
-            if (mainTextBlockId) {
-              const changes = {
-                content: errorText,
-                status: MessageBlockStatus.ERROR
-              }
-              dispatch(updateOneBlock({ id: mainTextBlockId, changes }))
-              saveUpdatedBlockToDB(mainTextBlockId, assistantMsgId, topicId, getState)
-            }
-            
-            dispatch(
-              newMessagesActions.updateMessage({
-                topicId,
-                messageId: assistantMsgId,
-                updates: { status: AssistantMessageStatus.SUCCESS }
-              })
-            )
-            
-            dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
-            return
+            const mcpError: any = new Error('MCP工具调用失败：经过10次重试，智慧办公助手始终未能调用MCP工具获取实时数据')
+            mcpError.shouldRetry = false // 不再重试
+            mcpError.isMCPFailure = true // 标记为MCP失败
+            mcpError.retryCount = currentRetryCount
+            throw mcpError
           } else {
             // 这种情况理论上不应该发生，因为所有查询都是强制的
             console.warn('[强制流程控制] 意外情况：未满足重试条件但也未达到最大重试次数')
@@ -967,6 +1015,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         // MCP工具调用完成检测（检测任何有工具信息的调用）
         if (toolResponse.tool && toolResponse.tool.name) {
           hasMCPToolCall = true
+          console.log(`[MCP检测] ✅ 检测到MCP工具调用完成! 工具: ${toolResponse.tool.name}, 状态: ${toolResponse.status}, 重试次数: ${currentRetryCount}`)
           if (isOfficeAssistant) {
             console.log('[强制流程控制] 智慧办公助手MCP工具调用完成:', toolResponse.tool.name, '状态:', toolResponse.status, 'ID:', toolResponse.id)
             // 如果有响应内容，也记录一下
@@ -1141,13 +1190,21 @@ const fetchAndProcessAssistantResponseImpl = async (
         const now = Date.now()
         
         // 检查是否是重试引起的中断错误信号（非真正的错误）
+        // 但是要允许重试错误(shouldRetry=true)通过，因为这是重试逻辑需要的
         const isRetryInterruption = coordinator?.isRetrying && 
                                    currentMsg?.retryBlockedUntil && 
-                                   now < currentMsg.retryBlockedUntil
+                                   now < currentMsg.retryBlockedUntil &&
+                                   !error.shouldRetry  // 允许重试错误通过
         
         if (isRetryInterruption) {
           console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略中断错误信号`)
           return
+        }
+        
+        // 如果是重试错误，直接重新抛出让重试包装器处理
+        if (error.shouldRetry) {
+          console.log(`[重试协调器] 检测到重试错误，重新抛出: ${error.message}`)
+          throw error
         }
         
         console.log(`[重试协调器] 处理错误信号: ${error.message}, 重试状态: ${coordinator?.isRetrying}`)
