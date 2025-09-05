@@ -187,6 +187,11 @@ export type Message = {
 
   // 块集合
   blocks: MessageBlock['id'][]
+  
+  // 重试状态管理 - 解决竞态条件
+  isRetrying?: boolean
+  retryBlockedUntil?: number
+  retryAttempts?: number
 }
 
 export interface Response {

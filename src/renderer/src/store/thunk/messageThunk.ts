@@ -42,6 +42,111 @@ import { isEmpty, throttle } from 'lodash'
 import { LRUCache } from 'lru-cache'
 
 import type { AppDispatch, RootState } from '../index'
+
+// 重试状态协调器 - 解决竞态条件问题
+interface RetryCoordinator {
+  isRetrying: boolean
+  abortPromise?: Promise<void>
+  retryCount: number
+  originalUserContent?: string
+}
+
+const retryCoordinators = new Map<string, RetryCoordinator>()
+
+// 辅助函数：清理重试协调器状态
+const cleanupRetryCoordinator = (messageId: string): void => {
+  const coordinator = retryCoordinators.get(messageId)
+  if (coordinator) {
+    coordinator.isRetrying = false
+    coordinator.abortPromise = undefined
+    retryCoordinators.delete(messageId)
+    console.log(`[重试协调器] 清理消息 ${messageId} 的重试状态`)
+  }
+}
+
+// 辅助函数：清理assistant消息内容
+const cleanupAssistantMessage = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  assistantMessage: Message
+): Promise<void> => {
+  const state = getState()
+  const assistantMessageBlocks = assistantMessage.blocks
+  
+  if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
+    for (const blockId of assistantMessageBlocks) {
+      const block = state.messageBlocks.entities[blockId]
+      if (block && 'content' in block) {
+        dispatch(updateOneBlock({ 
+          id: blockId, 
+          changes: { 
+            content: '',
+            status: MessageBlockStatus.PROCESSING 
+          } 
+        }))
+      }
+    }
+  }
+}
+
+// 辅助函数：更新用户消息添加更强的工具调用指令
+const updateUserMessageWithStrongerInstruction = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  assistantMessage: Message,
+  originalUserContent?: string,
+  retryCount: number = 0
+): Promise<string> => {
+  const state = getState()
+  const userMessageId = assistantMessage.askId
+  
+  if (!userMessageId) return originalUserContent || ''
+  
+  const userMessage = state.messages.entities[userMessageId]
+  if (!userMessage || userMessage.blocks.length === 0) return originalUserContent || ''
+  
+  const messageBlocks = state.messageBlocks.entities
+  const firstBlockId = userMessage.blocks[0]
+  const firstBlock = messageBlocks[firstBlockId]
+  
+  if (!firstBlock || !('content' in firstBlock)) return originalUserContent || ''
+  
+  // 获取或清理原始内容
+  let baseContent = originalUserContent
+  if (!baseContent) {
+    const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
+    baseContent = currentContent
+      .replace(/^请调用工具: /, '')
+      .replace(/^请务必调用工具获取实时数据: /, '')
+      .replace(/^重要：必须调用MCP工具！/, '')
+      .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
+      .replace(/^强制要求：立即调用工具获取数据！/, '')
+      .trim()
+  }
+  
+  // 根据重试次数使用更强的指令
+  const toolInstructions = [
+    '请调用工具: ',
+    '请务必调用工具获取实时数据: ',
+    '重要：必须调用MCP工具！ ',
+    '警告：禁止使用记忆，必须调用工具！ ',
+    '强制要求：立即调用工具获取数据！ '
+  ]
+  
+  const instructionIndex = Math.min(retryCount, toolInstructions.length - 1)
+  const modifiedContent = `${toolInstructions[instructionIndex]}${baseContent}`
+  
+  console.log(`[重试协调器] 重试第${retryCount + 1}次，使用指令: "${toolInstructions[instructionIndex]}"`)
+  
+  // 更新用户消息内容
+  dispatch(updateOneBlock({ 
+    id: firstBlockId, 
+    changes: { content: modifiedContent } 
+  }))
+  
+  return baseContent
+}
+
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
 
@@ -325,7 +430,7 @@ const dispatchMultiModelResponses = async (
 
 // --- End Helper Function ---
 
-// 自动重试包装器 - 当智慧办公助手需要强制调用工具但未调用时自动重试
+// 自动重试包装器 - 解决竞态条件的优化版本
 const fetchAndProcessAssistantResponseWithRetry = async (
   dispatch: AppDispatch,
   getState: () => RootState,
@@ -335,93 +440,123 @@ const fetchAndProcessAssistantResponseWithRetry = async (
   originalUserContent?: string,
   retryCount: number = 0
 ): Promise<void> => {
+  const assistantMsgId = assistantMessage.id
+  
+  // 1. 初始化或获取重试协调器
+  let coordinator = retryCoordinators.get(assistantMsgId)
+  if (!coordinator) {
+    coordinator = {
+      isRetrying: false,
+      retryCount: 0,
+      originalUserContent
+    }
+    retryCoordinators.set(assistantMsgId, coordinator)
+  }
+  
+  // 2. 更新重试状态
+  coordinator.isRetrying = true
+  coordinator.retryCount = retryCount
+  
+  // 3. 标记消息为重试状态，设置阻塞期
+  const retryBlockedUntil = Date.now() + 3000 // 3秒阻塞期
+  dispatch(newMessagesActions.updateMessage({
+    topicId,
+    messageId: assistantMsgId,
+    updates: { 
+      isRetrying: true, 
+      retryBlockedUntil,
+      retryAttempts: retryCount + 1
+    }
+  }))
+  
   try {
-    await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount)
+    console.log(`[重试协调器] 开始处理，重试次数: ${retryCount}, 阻塞至: ${new Date(retryBlockedUntil).toLocaleTimeString()}`)
+    
+    await fetchAndProcessAssistantResponseImpl(
+      dispatch, 
+      getState, 
+      topicId, 
+      assistant, 
+      assistantMessage, 
+      originalUserContent, 
+      retryCount
+    )
+    
+    // 成功完成，清理重试状态
+    cleanupRetryCoordinator(assistantMsgId)
+    
+    dispatch(newMessagesActions.updateMessage({
+      topicId,
+      messageId: assistantMsgId,
+      updates: { 
+        isRetrying: false, 
+        retryBlockedUntil: undefined,
+        retryAttempts: undefined
+      }
+    }))
+    
   } catch (error: any) {
+    console.log(`[重试协调器] 捕获错误:`, error.message)
+    
     // 如果是需要重试的错误，进行重试
     if (error.shouldRetry && retryCount < 10) {
-      console.log(`[强制流程控制] 准备重试，当前重试次数: ${retryCount + 1}/10`)
+      console.log(`[重试协调器] 准备重试，当前重试次数: ${retryCount + 1}/10`)
       
-      // 1. 清理assistant消息的内容，准备重新生成
-      const state = getState()
-      const assistantMessageBlocks = assistantMessage.blocks
+      // 创建强制中断承诺
+      coordinator.abortPromise = new Promise<void>((resolve) => {
+        console.log(`[重试协调器] 执行强制中断`)
+        abortCompletion(assistantMsgId)
+        
+        // 确保中断完成后再继续
+        setTimeout(() => {
+          console.log(`[重试协调器] 中断完成，准备清理和重试`)
+          resolve()
+        }, 500)
+      })
       
-      // 清理assistant消息的所有blocks
-      if (assistantMessageBlocks && assistantMessageBlocks.length > 0) {
-        for (const blockId of assistantMessageBlocks) {
-          const block = state.messageBlocks.entities[blockId]
-          if (block) {
-            // 清空block内容但保留结构
-            if ('content' in block) {
-              dispatch(updateOneBlock({ 
-                id: blockId, 
-                changes: { 
-                  content: '',
-                  status: MessageBlockStatus.PROCESSING 
-                } 
-              }))
-            }
-          }
-        }
-      }
+      // 等待中断完成
+      await coordinator.abortPromise
       
-      // 2. 修改用户消息，添加更强的工具调用指令
-      const userMessageId = assistantMessage.askId
-      if (userMessageId) {
-        const userMessage = state.messages.entities[userMessageId]
-        if (userMessage && userMessage.blocks.length > 0) {
-          const messageBlocks = state.messageBlocks.entities
-          const firstBlockId = userMessage.blocks[0]
-          const firstBlock = messageBlocks[firstBlockId]
-          
-          if (firstBlock && 'content' in firstBlock) {
-            // 使用原始内容作为基础（如果有的话）
-            let baseContent = originalUserContent
-            if (!baseContent) {
-              const currentContent = typeof firstBlock.content === 'string' ? firstBlock.content : ''
-              // 清理已有的工具指令前缀，获取原始内容
-              baseContent = currentContent
-                .replace(/^请调用工具: /, '')
-                .replace(/^请务必调用工具获取实时数据: /, '')
-                .replace(/^重要：必须调用MCP工具！/, '')
-                .replace(/^警告：禁止使用记忆，必须调用工具！/, '')
-                .replace(/^强制要求：立即调用工具获取数据！/, '')
-                .trim()
-            }
-            
-            // 根据重试次数使用更强的指令
-            const toolInstructions = [
-              '请调用工具: ',
-              '请务必调用工具获取实时数据:',
-              '重要：必须调用MCP工具！',
-              '警告：禁止使用记忆，必须调用工具！',
-              '强制要求：立即调用工具获取数据！'
-            ]
-            
-            const instructionIndex = Math.min(retryCount, toolInstructions.length - 1)
-            const modifiedContent = `${toolInstructions[instructionIndex]}${baseContent}`
-            
-            console.log(`[强制流程控制] 重试第${retryCount + 1}次，使用指令: "${toolInstructions[instructionIndex]}"`)
-            console.log(`[强制流程控制] 完整内容: "${modifiedContent.substring(0, 100)}..."`)
-            
-            // 更新用户消息内容
-            dispatch(updateOneBlock({ id: firstBlockId, changes: { content: modifiedContent } }))
-            
-            // 保存原始内容供后续重试使用
-            if (!originalUserContent) {
-              originalUserContent = baseContent
-            }
-          }
-        }
-      }
+      // 清理assistant消息的内容
+      await cleanupAssistantMessage(dispatch, getState, assistantMessage)
       
-      // 3. 延迟后重新开始完整的API调用流程
+      // 修改用户消息添加更强的工具调用指令
+      const updatedOriginalContent = await updateUserMessageWithStrongerInstruction(
+        dispatch, 
+        getState, 
+        assistantMessage, 
+        originalUserContent, 
+        retryCount
+      )
+      
+      // 延迟重试，确保所有清理工作完成
       setTimeout(() => {
-        console.log(`[强制流程控制] 开始第${retryCount + 1}次重试，重新调用API`)
-        fetchAndProcessAssistantResponseWithRetry(dispatch, getState, topicId, assistant, assistantMessage, originalUserContent, retryCount + 1)
-      }, 1500)
+        console.log(`[重试协调器] 开始第${retryCount + 1}次重试`)
+        fetchAndProcessAssistantResponseWithRetry(
+          dispatch, 
+          getState, 
+          topicId, 
+          assistant, 
+          assistantMessage, 
+          updatedOriginalContent, 
+          retryCount + 1
+        )
+      }, 1000) // 减少延迟，提高响应性
+      
     } else {
-      // 超过最大重试次数或其他错误，抛出
+      // 超过最大重试次数或其他错误，清理状态并抛出
+      cleanupRetryCoordinator(assistantMsgId)
+      
+      dispatch(newMessagesActions.updateMessage({
+        topicId,
+        messageId: assistantMsgId,
+        updates: { 
+          isRetrying: false, 
+          retryBlockedUntil: undefined,
+          retryAttempts: undefined
+        }
+      }))
+      
       throw error
     }
   }
@@ -983,6 +1118,31 @@ const fetchAndProcessAssistantResponseImpl = async (
       },
       onError: async (error) => {
         console.dir(error, { depth: null })
+        
+        // 竞态条件防护：检查消息是否在重试状态
+        const coordinator = retryCoordinators.get(assistantMsgId)
+        if (coordinator?.isRetrying) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 正在重试中，忽略错误信号`)
+          return
+        }
+        
+        const state = getState()
+        const currentMsg = state.messages.entities[assistantMsgId]
+        
+        // 检查消息是否在阻塞期内
+        if (currentMsg?.retryBlockedUntil && Date.now() < currentMsg.retryBlockedUntil) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略错误信号`)
+          return
+        }
+        
+        // 如果消息标记为重试状态，也忽略错误信号
+        if (currentMsg?.isRetrying) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 标记为重试状态，忽略错误信号`)
+          return
+        }
+        
+        console.log(`[重试协调器] 处理错误信号:`, error.message)
+        
         const isErrorTypeAbort = isAbortError(error)
         let pauseErrorLanguagePlaceholder = ''
         if (isErrorTypeAbort) {
@@ -1039,6 +1199,27 @@ const fetchAndProcessAssistantResponseImpl = async (
       onComplete: async (status: AssistantMessageStatus, response?: Response) => {
         const finalStateOnComplete = getState()
         const finalAssistantMsg = finalStateOnComplete.messages.entities[assistantMsgId]
+        
+        // 竞态条件防护：检查消息是否在重试状态
+        const coordinator = retryCoordinators.get(assistantMsgId)
+        if (coordinator?.isRetrying) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 正在重试中，忽略完成信号`)
+          return
+        }
+        
+        // 检查消息是否在阻塞期内
+        if (finalAssistantMsg?.retryBlockedUntil && Date.now() < finalAssistantMsg.retryBlockedUntil) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 在重试阻塞期内，忽略完成信号`)
+          return
+        }
+        
+        // 如果消息标记为重试状态，也忽略完成信号
+        if (finalAssistantMsg?.isRetrying) {
+          console.log(`[重试协调器] 消息 ${assistantMsgId} 标记为重试状态，忽略完成信号`)
+          return
+        }
+
+        console.log(`[重试协调器] 处理消息完成信号，状态: ${status}`)
 
         if (status === 'success' && finalAssistantMsg) {
           const userMsgId = finalAssistantMsg.askId
